@@ -29,19 +29,16 @@ pub struct Account<S: Storage> {
 }
 
 impl<S: Storage> Account<S> {
-    // Bundling these into a struct would trade the lint for an indirection at
-    // the only two call sites, both of which name every field explicitly.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         rpc: RpcClient,
         storage: S,
         prover: Handle<dyn Prover>,
         user_address: NoteOwnerAddress,
-        signer_address: SignerAddress,
         signer: Handle<dyn Signer>,
         sync: SyncHandle,
         contract_config: ContractConfig,
     ) -> Self {
+        let signer_address = signer.signer_address();
         Self {
             rpc,
             storage,
@@ -431,6 +428,10 @@ mod derive_privacy_keys_tests {
 
     #[async_trait::async_trait(?Send)]
     impl crate::Signer for PanicOnMessageSigner {
+        fn signer_address(&self) -> SignerAddress {
+            self.0.signer_address()
+        }
+
         async fn sign_transaction(
             &self,
             prepared: &crate::PreparedTransaction,
@@ -449,11 +450,7 @@ mod derive_privacy_keys_tests {
     #[tokio::test]
     async fn derive_privacy_keys_derives_and_persists_privacy_keys_for_the_owner() {
         let account = test_client()
-            .account(
-                NoteOwnerAddress::new(OWNER),
-                SignerAddress::new(OWNER),
-                test_signer(OWNER),
-            )
+            .account(NoteOwnerAddress::new(OWNER), test_signer(OWNER))
             .expect("open account");
 
         account.derive_privacy_keys().await.expect("derive keys");
@@ -468,18 +465,13 @@ mod derive_privacy_keys_tests {
     async fn derive_privacy_keys_does_not_re_derive_when_keys_already_exist() {
         let client = test_client();
         let account = client
-            .account(
-                NoteOwnerAddress::new(OWNER),
-                SignerAddress::new(OWNER),
-                test_signer(OWNER),
-            )
+            .account(NoteOwnerAddress::new(OWNER), test_signer(OWNER))
             .expect("open account");
         account.derive_privacy_keys().await.expect("derive keys");
 
         let account = client
             .account(
                 NoteOwnerAddress::new(OWNER),
-                SignerAddress::new(OWNER),
                 Handle::from_box(
                     Box::new(PanicOnMessageSigner(test_signer(OWNER))) as Box<dyn crate::Signer>
                 ),
@@ -505,11 +497,7 @@ mod derive_privacy_keys_tests {
         const DELEGATE: &str = "GD6ROJBYLKQMOW3E7N4M2YBPUHMZD7PL65VRHRMO24BOVSBV5H3BQRSL";
 
         let account = test_client()
-            .account(
-                NoteOwnerAddress::new(DELEGATE),
-                SignerAddress::new(DELEGATE),
-                test_signer(OWNER),
-            )
+            .account(NoteOwnerAddress::new(DELEGATE), test_signer(DELEGATE))
             .expect("open account");
 
         let error = account

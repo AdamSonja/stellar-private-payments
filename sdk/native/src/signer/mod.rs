@@ -5,7 +5,7 @@ use crate::chain::PreparedSorobanTx;
 use crate::{
     PreparedTransaction,
     error::Error,
-    types::{KeyDerivationSignature, SignedTransaction},
+    types::{KeyDerivationSignature, SignedTransaction, SignerAddress},
 };
 
 mod local;
@@ -15,6 +15,8 @@ pub use local::LocalSigner;
 /// Signs a simulated [`PreparedTransaction`] before chain submission.
 #[async_trait::async_trait(?Send)]
 pub trait Signer {
+    fn signer_address(&self) -> SignerAddress;
+
     async fn sign_transaction(
         &self,
         prepared: &PreparedTransaction,

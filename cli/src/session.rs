@@ -169,15 +169,14 @@ fn open_account(
     client
         .account(
             NoteOwnerAddress::new(owner.address.as_str()),
-            SignerAddress::new(signer.address.as_str()),
             alias_signer(config, &signer, network),
         )
         .map_err(|e| anyhow::anyhow!("open account session: {e}"))
 }
 
-/// The signer delegates identity to the Stellar CLI keystore, so it needs the
-/// payer's alias and nothing else.
-pub(crate) fn alias_signer(
+/// The signer delegates identity to the Stellar CLI keystore, so it carries the
+/// payer's alias and address.
+fn alias_signer(
     config: &CliConfig,
     signer: &Account,
     network: &StellarNetwork,
@@ -187,6 +186,7 @@ pub(crate) fn alias_signer(
         rpc_url: network.rpc_url.clone(),
         network_passphrase: network.passphrase.clone(),
         config_dir: config.stellar_config_dir.clone(),
+        signer_address: SignerAddress::new(signer.address.as_str()),
     }) as Box<dyn Signer>)
 }
 
