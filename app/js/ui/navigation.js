@@ -651,10 +651,7 @@ export const Wallet = {
                 userAddress: owner,
                 signerAddress: owner,
             });
-            const hash = await client().account().registerPublicKeys({
-                notePublicKeyHex: App.state.keys.notePublicKey,
-                encryptionPublicKeyHex: App.state.keys.encryptionPublicKey,
-            });
+            const hash = await client().account().registerPublicKeys();
             App.state.profile.registered = true;
             renderSettingsDrawer();
             Toast.show(`Public keys registered: ${Utils.truncateHex(hash, 10, 8)}`, 'success', 7000, {
