@@ -1,16 +1,18 @@
 use crate::{
     Error, ExtData, PoolContract, PoolContractClient, Proof, hash_ext_data,
-    merkle_with_history::{MerkleDataKey, MerkleTreeWithHistory},
+    merkle_with_history::{MerkleDataKey, MerkleTreeWithHistory, TreeState},
     policy,
+    pool::DataKey,
 };
 use asp_membership::{ASPMembership, ASPMembershipClient};
 use asp_non_membership::{ASPNonMembership, ASPNonMembershipClient};
 use circom_groth16_verifier::{CircomGroth16Verifier, Groth16Proof};
 use soroban_sdk::{
-    Address, Bytes, BytesN, Env, I256, U256, Vec,
+    Address, Bytes, BytesN, Env, I256, IntoVal, U256, Val, Vec,
     crypto::bn254::{Bn254G1Affine as G1Affine, Bn254G2Affine as G2Affine},
-    testutils::Address as _,
+    testutils::{Address as _, storage::Persistent as _},
     token::{Client as TokenClient, StellarAssetClient},
+    xdr::ToXdr,
 };
 use soroban_utils::{constants::bn256_modulus, utils::MockToken};
 
@@ -298,6 +300,32 @@ fn test_env() -> Env {
     }
 }
 
+fn insert_pair(env: &Env, pool_id: &Address, left: u32, right: u32) {
+    env.as_contract(pool_id, || {
+        MerkleTreeWithHistory::insert_two_leaves(
+            env,
+            U256::from_u32(env, left),
+            U256::from_u32(env, right),
+        )
+        .unwrap_or_else(|err| panic!("expected leaf insertion to succeed: {err:?}"));
+    });
+}
+
+fn tree_state(env: &Env, pool_id: &Address) -> TreeState {
+    env.as_contract(pool_id, || {
+        env.storage()
+            .persistent()
+            .get(&MerkleDataKey::State)
+            .unwrap_or_else(|| panic!("expected the tree state to be stored"))
+    })
+}
+
+/// Keys of every persistent entry in the environment, the footprint an
+/// insertion may touch.
+fn persistent_keys(env: &Env, pool_id: &Address) -> Vec<Val> {
+    env.as_contract(pool_id, || env.storage().persistent().all().keys())
+}
+
 #[test]
 fn pool_constructor_sets_state() {
     let env = test_env();
@@ -321,19 +349,18 @@ fn pool_constructor_sets_state() {
     });
     let stored_max: U256 = env.as_contract(&pool_id, || {
         env.storage()
-            .persistent()
+            .instance()
             .get(&crate::pool::DataKey::MaximumDepositAmount)
             .unwrap_or_else(|| panic!("expected maximum deposit amount to be stored"))
     });
-    let has_merkle_root = env.as_contract(&pool_id, || {
-        env.storage()
-            .persistent()
-            .has(&MerkleDataKey::CurrentRootIndex)
+    let root_index = env.as_contract(&pool_id, || {
+        MerkleTreeWithHistory::current_root_index(&env)
+            .unwrap_or_else(|err| panic!("expected the tree to be initialized: {err:?}"))
     });
 
     assert_eq!(stored_admin, setup.admin);
     assert_eq!(stored_max, max);
-    assert!(has_merkle_root);
+    assert_eq!(root_index, 0);
     let _root = pool.get_root();
 }
 
@@ -364,7 +391,7 @@ fn merkle_init_only_once() {
 }
 
 #[test]
-fn the_tree_stores_no_zero_hashes() {
+fn the_depth_lives_in_the_instance() {
     let env = test_env();
     let setup = setup_test_contracts(&env);
     let levels = 8u32;
@@ -377,11 +404,302 @@ fn the_tree_stores_no_zero_hashes() {
     );
 
     env.as_contract(&pool_id, || {
-        let storage = env.storage().persistent();
-        assert!(!storage.has(&MerkleDataKey::FilledSubtree(0)));
-        assert!(!storage.has(&MerkleDataKey::FilledSubtree(levels)));
-        assert!(storage.has(&MerkleDataKey::FilledSubtree(1)));
+        assert_eq!(
+            env.storage()
+                .instance()
+                .get::<_, u32>(&MerkleDataKey::Levels),
+            Some(levels)
+        );
+        assert!(!env.storage().persistent().has(&MerkleDataKey::Levels));
     });
+}
+
+#[test]
+fn the_filled_subtrees_are_one_entry() {
+    let env = test_env();
+    let setup = setup_test_contracts(&env);
+    let levels = 8u32;
+    let pool_id = register_pool(
+        &env,
+        &setup,
+        U256::from_u32(&env, 100),
+        levels,
+        policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+    );
+
+    assert_eq!(
+        tree_state(&env, &pool_id).filled_subtrees.len(),
+        levels.saturating_sub(1)
+    );
+}
+
+/// The pool keeps two persistent entries, the administrator and the tree, and
+/// insertions rewrite the tree's entry and create no other, so the persistent
+/// keys a transaction touches do not depend on how many leaves the tree holds.
+///
+/// The listing covers every contract in the environment, so the pool is
+/// registered alone, with placeholder addresses for the contracts it names.
+#[test]
+fn the_tree_is_one_persistent_entry() {
+    let env = test_env();
+    let pool_id = env.register(
+        PoolContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+            U256::from_u32(&env, 1000),
+            8u32,
+            policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+        ),
+    );
+    let keys_after_init = persistent_keys(&env, &pool_id);
+    let admin_key: Val = crate::pool::DataKey::Admin.into_val(&env);
+    let state_key: Val = MerkleDataKey::State.into_val(&env);
+    assert_eq!(keys_after_init.len(), 2);
+    assert!(keys_after_init.contains(admin_key));
+    assert!(keys_after_init.contains(state_key));
+
+    for pair in 0..3u32 {
+        let left = pair.saturating_mul(2);
+        insert_pair(&env, &pool_id, left, left.saturating_add(1));
+    }
+
+    assert_eq!(persistent_keys(&env, &pool_id), keys_after_init);
+}
+
+/// The entry's size is part of a transaction's declared footprint too, so it
+/// is fixed at `init` rather than growing with the ring.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "too slow under Miri: 91 Merkle insertions exceed the 6h job limit"
+)]
+fn the_tree_entry_size_is_fixed() {
+    let env = test_env();
+    let setup = setup_test_contracts(&env);
+    let pool_id = register_pool(
+        &env,
+        &setup,
+        U256::from_u32(&env, 1000),
+        8,
+        policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+    );
+    let entry_len = || tree_state(&env, &pool_id).to_xdr(&env).len();
+    let len_after_init = entry_len();
+
+    insert_pair(&env, &pool_id, 0, 1);
+    let len_after_one_pair = entry_len();
+    for pair in 1..=ROOT_HISTORY_SIZE {
+        let left = pair.saturating_mul(2);
+        insert_pair(&env, &pool_id, left, left.saturating_add(1));
+    }
+
+    assert_eq!(len_after_one_pair, len_after_init);
+    assert_eq!(entry_len(), len_after_init);
+}
+
+/// Filling every ring slot with the empty root at `init` changes nothing
+/// about when that root stops being known: the ninetieth insertion overwrites
+/// slot zero, where the empty root lived before the slots were prefilled.
+#[test]
+#[cfg_attr(
+    miri,
+    ignore = "too slow under Miri: 90 Merkle insertions exceed the 6h job limit"
+)]
+fn the_empty_root_is_evicted_at_the_ninetieth_insertion() {
+    let env = test_env();
+    let setup = setup_test_contracts(&env);
+    let pool_id = register_pool(
+        &env,
+        &setup,
+        U256::from_u32(&env, 1000),
+        8,
+        policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+    );
+    let pool = PoolContractClient::new(&env, &pool_id);
+    let empty_root = pool.get_root();
+    assert!(pool.is_known_root(&empty_root));
+
+    for pair in 0..ROOT_HISTORY_SIZE.saturating_sub(1) {
+        let left = pair.saturating_mul(2);
+        insert_pair(&env, &pool_id, left, left.saturating_add(1));
+    }
+    assert!(pool.is_known_root(&empty_root));
+
+    insert_pair(&env, &pool_id, 178, 179);
+
+    assert!(!pool.is_known_root(&empty_root));
+}
+
+#[test]
+fn the_root_slot_follows_the_leaf_count() {
+    let env = test_env();
+    let setup = setup_test_contracts(&env);
+    let pool_id = register_pool(
+        &env,
+        &setup,
+        U256::from_u32(&env, 1000),
+        8,
+        policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+    );
+    let pool = PoolContractClient::new(&env, &pool_id);
+
+    for pair in 0..3u32 {
+        let left = pair.saturating_mul(2);
+        insert_pair(&env, &pool_id, left, left.saturating_add(1));
+    }
+    let third_root = pool.get_root();
+
+    let slot = env.as_contract(&pool_id, || {
+        MerkleTreeWithHistory::current_root_index(&env)
+            .unwrap_or_else(|err| panic!("expected the tree to be initialized: {err:?}"))
+    });
+    let slot_three = tree_state(&env, &pool_id)
+        .roots
+        .get(3)
+        .unwrap_or_else(|| panic!("expected the third slot to hold a root"));
+
+    assert_eq!(slot, 3);
+    assert_eq!(slot_three, third_root);
+}
+
+#[test]
+fn the_root_slot_wraps_after_ninety_inserts() {
+    let env = test_env();
+    let setup = setup_test_contracts(&env);
+    let pool_id = register_pool(
+        &env,
+        &setup,
+        U256::from_u32(&env, 1000),
+        8,
+        policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+    );
+    let pool = PoolContractClient::new(&env, &pool_id);
+    let first_root = pool.get_root();
+
+    insert_pair(&env, &pool_id, 0, 1);
+    let slot_one_root = pool.get_root();
+    for pair in 1..89u32 {
+        let left = pair.saturating_mul(2);
+        insert_pair(&env, &pool_id, left, left.saturating_add(1));
+    }
+    let slot_eighty_nine_root = pool.get_root();
+    insert_pair(&env, &pool_id, 178, 179);
+
+    let slot = env.as_contract(&pool_id, || {
+        MerkleTreeWithHistory::current_root_index(&env)
+            .unwrap_or_else(|err| panic!("expected the tree to be initialized: {err:?}"))
+    });
+    assert_eq!(slot, 0);
+    assert!(!pool.is_known_root(&first_root));
+    assert!(pool.is_known_root(&slot_one_root));
+    assert!(pool.is_known_root(&slot_eighty_nine_root));
+}
+
+#[test]
+fn is_known_root_finds_the_previous_root_after_one_insert() {
+    let env = test_env();
+    let setup = setup_test_contracts(&env);
+    let pool_id = register_pool(
+        &env,
+        &setup,
+        U256::from_u32(&env, 1000),
+        8,
+        policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+    );
+    let pool = PoolContractClient::new(&env, &pool_id);
+    let previous = pool.get_root();
+
+    insert_pair(&env, &pool_id, 1, 2);
+
+    assert!(pool.is_known_root(&previous));
+}
+
+#[test]
+fn the_configuration_lives_in_the_instance() {
+    let env = test_env();
+    let setup = setup_test_contracts(&env);
+    let pool_id = register_pool(
+        &env,
+        &setup,
+        U256::from_u32(&env, 1000),
+        3,
+        policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+    );
+
+    env.as_contract(&pool_id, || {
+        let instance = env.storage().instance();
+        let persistent = env.storage().persistent();
+        for key in [
+            DataKey::Token,
+            DataKey::Verifier,
+            DataKey::MaximumDepositAmount,
+            DataKey::ASPMembership,
+            DataKey::ASPNonMembership,
+            DataKey::PolicyFlags,
+        ] {
+            assert!(instance.has(&key), "{key:?} should live in the instance");
+            assert!(
+                !persistent.has(&key),
+                "{key:?} should not have a persistent entry"
+            );
+        }
+    });
+}
+
+#[test]
+fn update_asp_membership_rewrites_the_instance_key() {
+    let env = test_env();
+    let setup = setup_test_contracts(&env);
+    let pool_id = register_pool(
+        &env,
+        &setup,
+        U256::from_u32(&env, 1000),
+        3,
+        policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+    );
+    let pool = PoolContractClient::new(&env, &pool_id);
+    env.mock_all_auths();
+
+    let new_asp_membership = Address::generate(&env);
+    pool.update_asp_membership(&new_asp_membership);
+
+    let stored: Address = env.as_contract(&pool_id, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::ASPMembership)
+            .unwrap_or_else(|| panic!("expected the membership address to be stored"))
+    });
+    assert_eq!(stored, new_asp_membership);
+}
+
+#[test]
+fn update_asp_non_membership_rewrites_the_instance_key() {
+    let env = test_env();
+    let setup = setup_test_contracts(&env);
+    let pool_id = register_pool(
+        &env,
+        &setup,
+        U256::from_u32(&env, 1000),
+        3,
+        policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+    );
+    let pool = PoolContractClient::new(&env, &pool_id);
+    env.mock_all_auths();
+
+    let new_asp_non_membership = Address::generate(&env);
+    pool.update_asp_non_membership(&new_asp_non_membership);
+
+    let stored: Address = env.as_contract(&pool_id, || {
+        env.storage()
+            .instance()
+            .get(&DataKey::ASPNonMembership)
+            .unwrap_or_else(|| panic!("expected the non-membership address to be stored"))
+    });
+    assert_eq!(stored, new_asp_non_membership);
 }
 
 #[test]
@@ -414,15 +732,9 @@ fn merkle_insert_updates_root_and_index() {
             MerkleTreeWithHistory::is_known_root(&env, &root)
                 .unwrap_or_else(|err| panic!("expected root lookup to succeed: {err:?}"))
         );
-
-        // nextIndex should now be 2 (stored in persistent storage)
-        let next: u64 = env
-            .storage()
-            .persistent()
-            .get(&MerkleDataKey::NextIndex)
-            .unwrap_or_else(|| panic!("expected next index to be stored"));
-        assert_eq!(next, 2);
     });
+
+    assert_eq!(tree_state(&env, &pool_id).next_index, 2);
 }
 
 #[test]
@@ -843,7 +1155,7 @@ fn get_policy_flags_errors_when_unset() {
 
     env.as_contract(&pool_id, || {
         env.storage()
-            .persistent()
+            .instance()
             .remove(&crate::pool::DataKey::PolicyFlags);
     });
 
@@ -954,7 +1266,7 @@ fn transact_errors_when_policy_flags_unset() {
 
     env.as_contract(&pool_id, || {
         env.storage()
-            .persistent()
+            .instance()
             .remove(&crate::pool::DataKey::PolicyFlags);
     });
 

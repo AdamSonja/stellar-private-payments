@@ -6,7 +6,7 @@ use crate::{
     Error, ExtData, PoolGvkContract, PoolGvkContractClient, Proof,
     gvk::{self, BabyJubJubPoint, GvkCiphertext, TRACEABLE, VIEW_ONLY},
     hash_ext_data,
-    merkle_with_history::MerkleDataKey,
+    merkle_with_history::{MerkleDataKey, MerkleTreeWithHistory, TreeState},
     policy,
     pool_gvk::DataKey,
 };
@@ -61,13 +61,6 @@ struct TestSetup {
     asp_non_membership_address: Address,
     asp_membership_client: ASPMembershipClient<'static>,
     asp_non_membership_client: ASPNonMembershipClient<'static>,
-}
-
-fn register_funded_token(env: &Env, holder: &Address, amount: i128) -> Address {
-    let token = env.register_stellar_asset_contract_v2(Address::generate(env));
-    let address = token.address();
-    StellarAssetClient::new(env, &address).mint(holder, &amount);
-    address
 }
 
 /// Creates and deploys all contracts needed for testing, including a real
@@ -148,19 +141,18 @@ fn pool_gvk_constructor_sets_state() {
     });
     let stored_max: U256 = env.as_contract(&pool_id, || {
         env.storage()
-            .persistent()
+            .instance()
             .get(&DataKey::MaximumDepositAmount)
             .unwrap_or_else(|| panic!("expected maximum deposit amount to be stored"))
     });
-    let has_merkle_root = env.as_contract(&pool_id, || {
-        env.storage()
-            .persistent()
-            .has(&MerkleDataKey::CurrentRootIndex)
+    let root_index = env.as_contract(&pool_id, || {
+        MerkleTreeWithHistory::current_root_index(&env)
+            .unwrap_or_else(|err| panic!("expected the tree to be initialized: {err:?}"))
     });
 
     assert_eq!(stored_admin, setup.admin);
     assert_eq!(stored_max, max);
-    assert!(has_merkle_root);
+    assert_eq!(root_index, 0);
     assert_eq!(pool.get_admin_view_key(), admin_view_key);
     assert_eq!(pool.get_gvk_mode(), TRACEABLE);
     assert_eq!(
@@ -170,7 +162,7 @@ fn pool_gvk_constructor_sets_state() {
 }
 
 #[test]
-fn the_tree_stores_no_zero_hashes() {
+fn the_depth_lives_in_the_instance() {
     let env = test_env();
     let setup = setup_test_contracts(&env);
     let levels = 8u32;
@@ -185,11 +177,39 @@ fn the_tree_stores_no_zero_hashes() {
     );
 
     env.as_contract(&pool_id, || {
-        let storage = env.storage().persistent();
-        assert!(!storage.has(&MerkleDataKey::FilledSubtree(0)));
-        assert!(!storage.has(&MerkleDataKey::FilledSubtree(levels)));
-        assert!(storage.has(&MerkleDataKey::FilledSubtree(1)));
+        assert_eq!(
+            env.storage()
+                .instance()
+                .get::<_, u32>(&MerkleDataKey::Levels),
+            Some(levels)
+        );
+        assert!(!env.storage().persistent().has(&MerkleDataKey::Levels));
     });
+}
+
+#[test]
+fn the_filled_subtrees_are_one_entry() {
+    let env = test_env();
+    let setup = setup_test_contracts(&env);
+    let levels = 8u32;
+    let pool_id = register_pool_gvk(
+        &env,
+        &setup,
+        U256::from_u32(&env, 100),
+        levels,
+        policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+        mk_point(&env, 7, 11),
+        TRACEABLE,
+    );
+
+    let state: TreeState = env.as_contract(&pool_id, || {
+        env.storage()
+            .persistent()
+            .get(&MerkleDataKey::State)
+            .unwrap_or_else(|| panic!("expected the tree state to be stored"))
+    });
+
+    assert_eq!(state.filled_subtrees.len(), levels.saturating_sub(1));
 }
 
 #[test]
@@ -463,7 +483,7 @@ fn pool_gvk_update_asp_membership_transfers_control() {
 
     let stored: Address = env.as_contract(&pool_id, || {
         env.storage()
-            .persistent()
+            .instance()
             .get(&DataKey::ASPMembership)
             .unwrap_or_else(|| panic!("expected ASP membership address to be stored"))
     });
@@ -491,7 +511,7 @@ fn pool_gvk_update_asp_non_membership_transfers_control() {
 
     let stored: Address = env.as_contract(&pool_id, || {
         env.storage()
-            .persistent()
+            .instance()
             .get(&DataKey::ASPNonMembership)
             .unwrap_or_else(|| panic!("expected ASP non-membership address to be stored"))
     });
@@ -1090,7 +1110,7 @@ fn transact_errors_when_policy_flags_unset() {
     let pool = PoolGvkContractClient::new(&env, &pool_id);
 
     env.as_contract(&pool_id, || {
-        env.storage().persistent().remove(&DataKey::PolicyFlags);
+        env.storage().instance().remove(&DataKey::PolicyFlags);
     });
 
     env.mock_all_auths();
@@ -1978,6 +1998,48 @@ fn transact_rejects_replayed_nullifier() {
         matches!(second, Err(Ok(Error::AlreadySpentNullifier))),
         "expected replaying the same nullifier to be rejected, got {second:?}"
     );
+}
+#[test]
+fn the_configuration_lives_in_the_instance() {
+    let env = test_env();
+    let setup = setup_test_contracts(&env);
+    let pool_id = register_pool_gvk(
+        &env,
+        &setup,
+        U256::from_u32(&env, 1000),
+        3,
+        policy::ALLOWLIST_BIT | policy::BLOCKLIST_BIT,
+        mk_point(&env, 7, 11),
+        TRACEABLE,
+    );
+
+    env.as_contract(&pool_id, || {
+        let instance = env.storage().instance();
+        let persistent = env.storage().persistent();
+        for key in [
+            DataKey::Token,
+            DataKey::Verifier,
+            DataKey::MaximumDepositAmount,
+            DataKey::ASPMembership,
+            DataKey::ASPNonMembership,
+            DataKey::PolicyFlags,
+            DataKey::AdminViewKey,
+            DataKey::GvkMode,
+        ] {
+            assert!(instance.has(&key), "{key:?} should live in the instance");
+            assert!(
+                !persistent.has(&key),
+                "{key:?} should not have a persistent entry"
+            );
+        }
+    });
+}
+
+fn register_funded_token(env: &Env, holder: &Address, amount: i128) -> Address {
+    let token = env.register_stellar_asset_contract_v2(Address::generate(env));
+    let address = token.address();
+    StellarAssetClient::new(env, &address).mint(holder, &amount);
+    address
 }
 
 /// A verifier rejection must reach the caller as pool-gvk's own `InvalidProof`.
