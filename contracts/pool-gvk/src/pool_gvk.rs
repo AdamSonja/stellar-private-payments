@@ -86,24 +86,31 @@ impl PoolError for Error {
     fn already_initialized() -> Self {
         Self::AlreadyInitialized
     }
+
     fn wrong_levels() -> Self {
         Self::WrongLevels
     }
+
     fn merkle_tree_full() -> Self {
         Self::MerkleTreeFull
     }
+
     fn next_index_not_even() -> Self {
         Self::NextIndexNotEven
     }
+
     fn not_initialized() -> Self {
         Self::NotInitialized
     }
+
     fn overflow() -> Self {
         Self::Overflow
     }
+
     fn wrong_ext_amount() -> Self {
         Self::WrongExtAmount
     }
+
     fn non_canonical_public_input() -> Self {
         Self::NonCanonicalPublicInput
     }
@@ -456,11 +463,11 @@ impl PoolGvkContract {
 
     /// Validate a ciphertext's `r.x`, `r.y`, `c1`, `c2`, `c3` fields.
     fn validate_gvk_ciphertext(ct: &GvkCiphertext, modulus: &U256) -> Result<(), Error> {
-        amounts::require_canonical_bn256_input(&ct.r.x, modulus)?;
-        amounts::require_canonical_bn256_input(&ct.r.y, modulus)?;
-        amounts::require_canonical_bn256_input(&ct.c1, modulus)?;
-        amounts::require_canonical_bn256_input(&ct.c2, modulus)?;
-        amounts::require_canonical_bn256_input(&ct.c3, modulus)?;
+        amounts::require_canonical_bn256_input::<Error>(&ct.r.x, modulus)?;
+        amounts::require_canonical_bn256_input::<Error>(&ct.r.y, modulus)?;
+        amounts::require_canonical_bn256_input::<Error>(&ct.c1, modulus)?;
+        amounts::require_canonical_bn256_input::<Error>(&ct.c2, modulus)?;
+        amounts::require_canonical_bn256_input::<Error>(&ct.c3, modulus)?;
         Ok(())
     }
 
@@ -657,7 +664,7 @@ impl PoolGvkContract {
         let zero = I256::from_i32(env, 0);
         if ext_data.ext_amount > zero {
             let this = env.current_contract_address();
-            let amount = amounts::require_i128_nonneg(env, &ext_data.ext_amount)?;
+            let amount = amounts::require_i128_nonneg::<Error>(env, &ext_data.ext_amount)?;
             let token = Self::get_token(env)?;
             TokenClient::new(env, &token).transfer(&sender, &this, &amount);
         }
@@ -713,7 +720,7 @@ impl PoolGvkContract {
 
         // 4. Public amount check
         let expected_public_amount =
-            amounts::require_public_amount(env, ext_data.ext_amount.clone())?;
+            amounts::require_public_amount::<Error>(env, ext_data.ext_amount.clone())?;
         if proof.public_amount != expected_public_amount {
             return Err(Error::WrongExtAmount);
         }
@@ -780,7 +787,7 @@ impl PoolGvkContract {
 
         if ext_data.ext_amount < zero {
             let abs = zero.sub(&ext_data.ext_amount);
-            let amount: i128 = amounts::require_i128_nonneg(env, &abs)?;
+            let amount: i128 = amounts::require_i128_nonneg::<Error>(env, &abs)?;
             token_client.transfer(&this, &ext_data.recipient, &amount);
         }
 

@@ -39,14 +39,14 @@ jobs:
           hunks = re.split(r'(?m)^(?=Diff in )', txt)
           n = 0
           for h in hunks:
-              m = re.match(r'Diff in (.+?) at line (\d+):', h)
+              m = re.match(r'Diff in (.+?)(?:: at line |:)(\d+):', h)
               if not m:
                   continue
               n += 1
               if n > 9:
                   print("::warning::more fmt diffs exist in root workspace (truncated at 9)")
                   break
-              f, ln = m.group(1), m.group(2)
+              f, ln = m.group(1).replace('/home/runner/work/stellar-private-payments/stellar-private-payments/', ''), m.group(2)
               body = h[:700].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
               print(f"::error file={f},line={ln},title=root fmt mismatch::{body}")
           if n == 0:
@@ -72,14 +72,14 @@ jobs:
           hunks = re.split(r'(?m)^(?=Diff in )', txt)
           n = 0
           for h in hunks:
-              m = re.match(r'Diff in (.+?) at line (\d+):', h)
+              m = re.match(r'Diff in (.+?)(?:: at line |:)(\d+):', h)
               if not m:
                   continue
               n += 1
               if n > 9:
                   print("::warning::more fmt diffs exist in integration-tests (truncated at 9)")
                   break
-              f, ln = m.group(1), m.group(2)
+              f, ln = m.group(1).replace('/home/runner/work/stellar-private-payments/stellar-private-payments/', ''), m.group(2)
               body = h[:700].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
               print(f"::error file={f},line={ln},title=integration-tests fmt mismatch::{body}")
           if n == 0:

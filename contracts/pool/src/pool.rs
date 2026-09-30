@@ -79,24 +79,31 @@ impl PoolError for Error {
     fn already_initialized() -> Self {
         Self::AlreadyInitialized
     }
+
     fn wrong_levels() -> Self {
         Self::WrongLevels
     }
+
     fn merkle_tree_full() -> Self {
         Self::MerkleTreeFull
     }
+
     fn next_index_not_even() -> Self {
         Self::NextIndexNotEven
     }
+
     fn not_initialized() -> Self {
         Self::NotInitialized
     }
+
     fn overflow() -> Self {
         Self::Overflow
     }
+
     fn wrong_ext_amount() -> Self {
         Self::WrongExtAmount
     }
+
     fn non_canonical_public_input() -> Self {
         Self::NonCanonicalPublicInput
     }
@@ -371,7 +378,7 @@ impl PoolContract {
         let zero = I256::from_i32(env, 0);
         if ext_data.ext_amount > zero {
             let this = env.current_contract_address();
-            let amount = amounts::require_i128_nonneg(env, &ext_data.ext_amount)?;
+            let amount = amounts::require_i128_nonneg::<Error>(env, &ext_data.ext_amount)?;
             let token = Self::get_token(env)?;
             TokenClient::new(env, &token).transfer(&sender, &this, &amount);
         }
@@ -436,7 +443,7 @@ impl PoolContract {
 
         // 4. Public amount check
         let expected_public_amount =
-            amounts::require_public_amount(env, ext_data.ext_amount.clone())?;
+            amounts::require_public_amount::<Error>(env, ext_data.ext_amount.clone())?;
         if proof.public_amount != expected_public_amount {
             return Err(Error::WrongExtAmount);
         }
@@ -494,7 +501,7 @@ impl PoolContract {
 
         if ext_data.ext_amount < zero {
             let abs = zero.sub(&ext_data.ext_amount);
-            let amount: i128 = amounts::require_i128_nonneg(env, &abs)?;
+            let amount: i128 = amounts::require_i128_nonneg::<Error>(env, &abs)?;
             token_client.transfer(&this, &ext_data.recipient, &amount);
         }
 
