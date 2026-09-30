@@ -17,8 +17,9 @@ use crate::gvk::{self, BabyJubJubPoint, GvkCiphertext};
 use contract_types::Groth16Proof;
 use pool_core::{
     ASPMembershipClient, ASPNonMembershipClient, CircomGroth16VerifierClient, amounts,
+    error::PoolError,
     merkle_with_history::{Error as MerkleError, MerkleTreeWithHistory},
-    policy,
+    policy, storage,
 };
 use soroban_sdk::{
     Address, Bytes, BytesN, Env, I256, U256, Vec, contract, contracterror, contractevent,
@@ -76,14 +77,42 @@ pub enum Error {
 
 impl From<MerkleError> for Error {
     fn from(e: MerkleError) -> Self {
-        match e {
-            MerkleError::AlreadyInitialized => Error::AlreadyInitialized,
-            MerkleError::MerkleTreeFull => Error::MerkleTreeFull,
-            MerkleError::WrongLevels => Error::WrongLevels,
-            MerkleError::NextIndexNotEven => Error::NextIndexNotEven,
-            MerkleError::NotInitialized => Error::NotInitialized,
-            MerkleError::Overflow => Error::Overflow,
-        }
+        PoolError::from_merkle(e)
+    }
+}
+
+/// The shared `pool-core` helpers raise this contract's own variants.
+impl PoolError for Error {
+    fn already_initialized() -> Self {
+        Self::AlreadyInitialized
+    }
+
+    fn wrong_levels() -> Self {
+        Self::WrongLevels
+    }
+
+    fn merkle_tree_full() -> Self {
+        Self::MerkleTreeFull
+    }
+
+    fn next_index_not_even() -> Self {
+        Self::NextIndexNotEven
+    }
+
+    fn not_initialized() -> Self {
+        Self::NotInitialized
+    }
+
+    fn overflow() -> Self {
+        Self::Overflow
+    }
+
+    fn wrong_ext_amount() -> Self {
+        Self::WrongExtAmount
+    }
+
+    fn non_canonical_public_input() -> Self {
+        Self::NonCanonicalPublicInput
     }
 }
 
@@ -279,18 +308,12 @@ impl PoolGvkContract {
     /// input and is published in every proof, so it is not secret. There is
     /// no corresponding setter — see [`DataKey::AdminViewKey`].
     pub fn get_admin_view_key(env: &Env) -> Result<BabyJubJubPoint, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::AdminViewKey)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::AdminViewKey)
     }
 
     /// Get the Global View Key mode (`gvk::VIEW_ONLY` or `gvk::TRACEABLE`).
     pub fn get_gvk_mode(env: &Env) -> Result<u32, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::GvkMode)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::GvkMode)
     }
 
     /// Get the pool's ASP policy flags.
@@ -299,10 +322,7 @@ impl PoolGvkContract {
     }
 
     fn load_policy_flags(env: &Env) -> Result<u32, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::PolicyFlags)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::PolicyFlags)
     }
 
     /// Get the latest root of the Merkle tree that defines the pool.
@@ -319,8 +339,7 @@ impl PoolGvkContract {
     ///
     /// Presence of the per-nullifier storage key is the spent flag.
     pub fn is_spent(env: &Env, n: &U256) -> Result<bool, Error> {
-        let key = DataKey::Nullifier(n.clone());
-        Ok(env.storage().persistent().has(&key))
+        Ok(storage::persistent_has(env, &DataKey::Nullifier(n.clone())))
     }
 
     /// Update the contract administrator. Requires authorization from the
@@ -337,28 +356,19 @@ impl PoolGvkContract {
 
     /// Get the admin address.
     fn get_admin(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)
+        storage::persistent_get(env, &DataKey::Admin)
     }
 
     // ========== ASP Contract Functions ==========
 
     /// Get the ASP Membership contract address.
     fn get_asp_membership(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::ASPMembership)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::ASPMembership)
     }
 
     /// Get the ASP Non-Membership contract address.
     fn get_asp_non_membership(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::ASPNonMembership)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::ASPNonMembership)
     }
 
     /// Update the ASP Membership contract address.
@@ -438,90 +448,51 @@ impl PoolGvkContract {
 
     /// Get the token contract address.
     fn get_token(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::Token)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::Token)
     }
 
     /// Get the maximum deposit amount.
     fn get_maximum_deposit(env: &Env) -> Result<U256, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::MaximumDepositAmount)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::MaximumDepositAmount)
     }
 
     /// Get the verifier contract address.
     fn get_verifier(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::Verifier)
-            .ok_or(Error::NotInitialized)
-    }
-
-    /// Convert a non-negative I256 to i128 with bounds checking.
-    fn i256_to_i128_nonneg(env: &Env, v: &I256) -> Result<i128, Error> {
-        amounts::i256_to_i128_nonneg(env, v).ok_or(Error::WrongExtAmount)
-    }
-
-    /// Calculate the public amount from external amount:
-    /// `public_amount = ext_amount` in the BN256 field, wrapping negative
-    /// values to `FIELD_SIZE - |ext_amount|`.
-    fn calculate_public_amount(env: &Env, ext_amount: I256) -> Result<U256, Error> {
-        amounts::calculate_public_amount(env, ext_amount).ok_or(Error::WrongExtAmount)
-    }
-
-    /// Mark a nullifier as spent. Presence of the key is the spent flag.
-    fn mark_spent(env: &Env, n: &U256) -> Result<(), Error> {
-        let key = DataKey::Nullifier(n.clone());
-        env.storage().persistent().set(&key, &());
-        Ok(())
-    }
-
-    /// Reject values outside the canonical BN254 scalar-field range.
-    fn validate_bn256_public_input(value: &U256, modulus: &U256) -> Result<(), Error> {
-        if amounts::is_canonical_bn256_public_input(value, modulus) {
-            Ok(())
-        } else {
-            Err(Error::NonCanonicalPublicInput)
-        }
+        storage::instance_get(env, &DataKey::Verifier)
     }
 
     /// Validate a ciphertext's `r.x`, `r.y`, `c1`, `c2`, `c3` fields.
     fn validate_gvk_ciphertext(ct: &GvkCiphertext, modulus: &U256) -> Result<(), Error> {
-        Self::validate_bn256_public_input(&ct.r.x, modulus)?;
-        Self::validate_bn256_public_input(&ct.r.y, modulus)?;
-        Self::validate_bn256_public_input(&ct.c1, modulus)?;
-        Self::validate_bn256_public_input(&ct.c2, modulus)?;
-        Self::validate_bn256_public_input(&ct.c3, modulus)?;
+        amounts::require_canonical_bn256_input::<Error>(&ct.r.x, modulus)?;
+        amounts::require_canonical_bn256_input::<Error>(&ct.r.y, modulus)?;
+        amounts::require_canonical_bn256_input::<Error>(&ct.c1, modulus)?;
+        amounts::require_canonical_bn256_input::<Error>(&ct.c2, modulus)?;
+        amounts::require_canonical_bn256_input::<Error>(&ct.c3, modulus)?;
         Ok(())
     }
 
     /// Validate every `U256` field that contributes to the verifier's public
-    /// input vector: the base pool fields plus every GVK ciphertext field.
-    /// The transaction path checks `ext_data_hash` against `hash_ext_data`
-    /// before proof verification, so this covers the remaining public-input
-    /// values.
+    /// input vector: the base transact fields (shared with `pool` via
+    /// `pool-core`) plus every GVK ciphertext field. The transaction path
+    /// checks `ext_data_hash` against `hash_ext_data` before proof
+    /// verification, so this covers the remaining public-input values.
     fn validate_bn256_public_inputs(
         _env: &Env,
         proof: &Proof,
         policy_flags: u32,
         modulus: &U256,
     ) -> Result<(), Error> {
-        Self::validate_bn256_public_input(&proof.root, modulus)?;
-        Self::validate_bn256_public_input(&proof.public_amount, modulus)?;
-        for nullifier in proof.input_nullifiers.iter() {
-            Self::validate_bn256_public_input(&nullifier, modulus)?;
-        }
-        Self::validate_bn256_public_input(&proof.output_commitment0, modulus)?;
-        Self::validate_bn256_public_input(&proof.output_commitment1, modulus)?;
-        if policy::requires_membership_proofs(policy_flags) {
-            Self::validate_bn256_public_input(&proof.asp_membership_root, modulus)?;
-        }
-        if policy::requires_non_membership_proofs(policy_flags) {
-            Self::validate_bn256_public_input(&proof.asp_non_membership_root, modulus)?;
-        }
+        amounts::require_canonical_transact_inputs::<Error>(
+            &proof.root,
+            &proof.public_amount,
+            &proof.input_nullifiers,
+            &proof.output_commitment0,
+            &proof.output_commitment1,
+            &proof.asp_membership_root,
+            &proof.asp_non_membership_root,
+            policy_flags,
+            modulus,
+        )?;
         for ct in proof.input_gvk_ciphertexts.iter() {
             Self::validate_gvk_ciphertext(&ct, modulus)?;
         }
@@ -603,7 +574,7 @@ impl PoolGvkContract {
 
         // Declared public inputs: D, nonce, root, publicAmount, extDataHash,
         // inputNullifier[], outputCommitment[]. `nonce` reuses
-        // `ext_data_hash` (already checked equal by `internal_transact`).
+        // `ext_data_hash` (already checked equal by `verify_transact`).
         public_inputs.push_back(Bn254Fr::from_bytes(amounts::u256_to_bytes(
             env,
             &admin_view_key.x,
@@ -664,16 +635,15 @@ impl PoolGvkContract {
     /// Get the GVK mode, for internal use where the getter's `Result`
     /// wrapping would otherwise need re-mapping.
     fn load_gvk_mode(env: &Env) -> Result<u32, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::GvkMode)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::GvkMode)
     }
 
     /// Execute a shielded transaction with deposit handling.
     ///
     /// If `ext_amount > 0`, tokens are transferred from the sender to the
-    /// pool before processing the transaction.
+    /// pool only after the transaction has been fully verified
+    /// (checks-effects-interactions: no token may move while any check can
+    /// still fail).
     pub fn transact(
         env: &Env,
         proof: Proof,
@@ -681,31 +651,44 @@ impl PoolGvkContract {
         sender: Address,
     ) -> Result<(), Error> {
         sender.require_auth();
-        // The tree entry is rewritten below; keep the configuration it
-        // reads on the same lifetime.
+        // The tree entry is rewritten in `settle_transact` below; keep the
+        // configuration it reads on the same lifetime.
         pool_core::extend_instance(env);
-        let token = Self::get_token(env)?;
-        let token_client = TokenClient::new(env, &token);
-        let zero = I256::from_i32(env, 0);
 
+        // CHECKS: verify the transaction fully before any token moves.
+        Self::verify_transact(env, &proof, &ext_data)?;
+
+        // INTERACTION: collect the deposit only after every check has
+        // passed, so a transaction that fails verification never even
+        // attempts the transfer.
+        let zero = I256::from_i32(env, 0);
+        if ext_data.ext_amount > zero {
+            let this = env.current_contract_address();
+            let amount = amounts::require_i128_nonneg::<Error>(env, &ext_data.ext_amount)?;
+            let token = Self::get_token(env)?;
+            TokenClient::new(env, &token).transfer(&sender, &this, &amount);
+        }
+
+        // EFFECTS: spend nullifiers, pay out withdrawals, insert commitments.
+        Self::settle_transact(env, proof, ext_data)
+    }
+
+    /// Verify a private transaction without mutating any state: validates
+    /// the proof and all public inputs. Split from the bookkeeping so
+    /// `transact` can run every check (including the ZK proof) before its
+    /// deposit transfer — checks first, effects after.
+    fn verify_transact(env: &Env, proof: &Proof, ext_data: &ExtData) -> Result<(), Error> {
+        // 0. Deposit bound check. Pure check, run ahead of everything else
+        // so the error precedence matches the pre-split behavior (the bound
+        // was the first thing checked after authorization).
+        let zero = I256::from_i32(env, 0);
         if ext_data.ext_amount > zero {
             let deposit_u = U256::from_be_bytes(env, &ext_data.ext_amount.to_be_bytes());
             let max = Self::get_maximum_deposit(env)?;
             if deposit_u > max {
                 return Err(Error::WrongExtAmount);
             }
-            let this = env.current_contract_address();
-            let amount = Self::i256_to_i128_nonneg(env, &ext_data.ext_amount)?;
-            token_client.transfer(&sender, &this, &amount);
         }
-
-        Self::internal_transact(env, proof, ext_data)
-    }
-
-    /// Process a private transaction: validates the proof and all public
-    /// inputs, marks nullifiers as spent, processes withdrawals, and inserts
-    /// new commitments into the Merkle tree.
-    fn internal_transact(env: &Env, proof: Proof, ext_data: ExtData) -> Result<(), Error> {
         // 1. Merkle root check
         if !MerkleTreeWithHistory::is_known_root(env, &proof.root)? {
             return Err(Error::UnknownRoot);
@@ -730,14 +713,14 @@ impl PoolGvkContract {
         // additionally requires an identical note *and* salt. Only a prover
         // can arrange that, and only against their own privacy.
         let token = Self::get_token(env)?;
-        let ext_hash = hash_ext_data(env, &ext_data, &token);
+        let ext_hash = hash_ext_data(env, ext_data, &token);
         if ext_hash != proof.ext_data_hash {
             return Err(Error::WrongExtHash);
         }
 
         // 4. Public amount check
         let expected_public_amount =
-            Self::calculate_public_amount(env, ext_data.ext_amount.clone())?;
+            amounts::require_public_amount::<Error>(env, ext_data.ext_amount.clone())?;
         if proof.public_amount != expected_public_amount {
             return Err(Error::WrongExtAmount);
         }
@@ -759,11 +742,18 @@ impl PoolGvkContract {
 
         // 5. ZK proof verification (includes the GVK ciphertext-count and
         // canonical-range checks)
-        if !Self::verify_proof(env, &proof)? {
+        if !Self::verify_proof(env, proof)? {
             return Err(Error::InvalidProof);
         }
 
-        // 6. Mark nullifiers as spent. `input_gvk_ciphertexts` is either empty
+        Ok(())
+    }
+
+    /// Apply a verified private transaction: marks nullifiers as spent,
+    /// processes withdrawals, and inserts new commitments into the Merkle
+    /// tree. Runs only after `verify_transact` accepted the transaction.
+    fn settle_transact(env: &Env, proof: Proof, ext_data: ExtData) -> Result<(), Error> {
+        // 1. Mark nullifiers as spent. `input_gvk_ciphertexts` is either empty
         // (view-only) or exactly as long as `input_nullifiers` (traceable) —
         // already enforced by `verify_proof`'s ciphertext-count check above —
         // so a non-empty vec means every nullifier has a matching ciphertext
@@ -774,7 +764,7 @@ impl PoolGvkContract {
                 .input_nullifiers
                 .get(i)
                 .expect("index within input_nullifiers bounds");
-            let _ = Self::mark_spent(env, &n);
+            storage::persistent_set_unit(env, &DataKey::Nullifier(n.clone()));
             let gvk_ciphertext = if has_input_ciphertexts {
                 Some(proof.input_gvk_ciphertexts.get(i).expect(
                     "input_gvk_ciphertexts length already validated equal to input_nullifiers",
@@ -789,7 +779,7 @@ impl PoolGvkContract {
             .publish(env);
         }
 
-        // 7. Process withdrawal if ext_amount < 0
+        // 2. Process withdrawal if ext_amount < 0
         let token = Self::get_token(env)?;
         let token_client = TokenClient::new(env, &token);
         let this = env.current_contract_address();
@@ -797,18 +787,18 @@ impl PoolGvkContract {
 
         if ext_data.ext_amount < zero {
             let abs = zero.sub(&ext_data.ext_amount);
-            let amount: i128 = Self::i256_to_i128_nonneg(env, &abs)?;
+            let amount: i128 = amounts::require_i128_nonneg::<Error>(env, &abs)?;
             token_client.transfer(&this, &ext_data.recipient, &amount);
         }
 
-        // 8. Insert new commitments into Merkle tree
+        // 3. Insert new commitments into Merkle tree
         let (idx_0, idx_1) = MerkleTreeWithHistory::insert_two_leaves(
             env,
             proof.output_commitment0.clone(),
             proof.output_commitment1.clone(),
         )?;
 
-        // 9. Emit commitment events, each carrying its GVK ciphertext
+        // 4. Emit commitment events, each carrying its GVK ciphertext
         // (always present: both view-only and traceable modes encrypt every
         // output note).
         NewCommitmentEvent {

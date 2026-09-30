@@ -3,12 +3,16 @@
 use anyhow::Context;
 
 pub use crate::{
-    types::DisclosureContext,
+    types::{
+        AuthorityStatus, ContextMismatchReason, DisclosureContext, ExpectedAuthority,
+        ExpectedContext,
+    },
     zk::disclosure::{
         RegisteredCircuit, SELECTIVE_DISCLOSURE_1, SELECTIVE_DISCLOSURE_2, SELECTIVE_DISCLOSURE_3,
         SELECTIVE_DISCLOSURE_4, current_issued_at, derive_ext_context_hash, find_circuit,
         find_circuit_by_notes, prove_receipt_proof, prove_receipt_proof_with_prover,
-        validate_registered_receipt, verify_receipt_proof, vk_hash_hex,
+        validate_registered_receipt, verify_receipt_expected_context, verify_receipt_proof,
+        vk_hash_hex,
     },
 };
 
@@ -145,11 +149,30 @@ pub(crate) fn map_build_disclosure_inputs(
 
 /// Verify a selective-disclosure receipt: Groth16 proof, context hash, root
 /// freshness, and spent-nullifier status.
+///
+/// NOTE: This standalone verification function does not bind to a verifier's
+/// expected context (network, pool address, or authority). To verify with
+/// expected context binding, use
+/// [`crate::pool::PrivatePool::verify_disclosure`] or
+/// [`verify_disclosure_receipt_with_context`].
 pub async fn verify_disclosure_receipt(
     fetcher: &StateFetcher,
     prover: &dyn Prover,
     receipt: &DisclosureReceipt,
     expected_vk_hash: &str,
+) -> Result<DisclosureVerificationReport, Error> {
+    verify_disclosure_receipt_with_context(fetcher, prover, receipt, expected_vk_hash, None).await
+}
+
+/// Verify a selective-disclosure receipt against optional expected verifier
+/// context: Groth16 proof, context hash, root freshness, spent-nullifier
+/// status, and expected pool address, network, and authority.
+pub async fn verify_disclosure_receipt_with_context(
+    fetcher: &StateFetcher,
+    prover: &dyn Prover,
+    receipt: &DisclosureReceipt,
+    expected_vk_hash: &str,
+    expected_context: Option<&ExpectedContext>,
 ) -> Result<DisclosureVerificationReport, Error> {
     let proof_verified = prover
         .verify_disclosure_proof(receipt, expected_vk_hash)
@@ -157,7 +180,15 @@ pub async fn verify_disclosure_receipt(
     let context_verified = crate::zk::disclosure::verify_receipt_context(receipt)
         .context("context verification failed")?;
 
-    let pool_contract_id = receipt.context.pool_address.clone();
+    let (context_mismatches, authority_status) = match expected_context {
+        Some(expected) => crate::zk::disclosure::verify_receipt_expected_context(receipt, expected),
+        None => (Vec::new(), AuthorityStatus::Unchecked),
+    };
+
+    let pool_contract_id = match expected_context {
+        Some(expected) => expected.pool_address.clone(),
+        None => receipt.context.pool_address.clone(),
+    };
     let mut known_root_status = true;
     for root in &receipt.public_inputs.roots {
         let is_known = fetcher
@@ -190,5 +221,7 @@ pub async fn verify_disclosure_receipt(
         known_root_status,
         nullifiers_unspent,
         spent_nullifier_indices,
+        context_mismatches,
+        authority_status,
     })
 }

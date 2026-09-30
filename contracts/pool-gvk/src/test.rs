@@ -577,7 +577,7 @@ fn mk_ext_data(env: &Env, recipient: Address, ext_amount: i32) -> ExtData {
     }
 }
 
-/// Computes the hash `internal_transact` checks the proof against, by calling
+/// Computes the hash `verify_transact` checks the proof against, by calling
 /// the real `hash_ext_data` inside `pool`'s contract frame rather than
 /// reimplementing the encoding.
 fn compute_ext_hash(env: &Env, pool: &Address, token: &Address, ext: &ExtData) -> BytesN<32> {
@@ -1956,8 +1956,9 @@ fn transact_rejects_deposit_over_maximum() {
     let ext = mk_ext_data(&env, Address::generate(&env), 101); // exceeds the 100 maximum
     let (asp_membership_root, asp_non_membership_root) = asp_roots(&setup);
 
-    // Mock proof, `transact` rejects the deposit before `internal_transact` is
-    // reached, so the proof itself never needs to be valid.
+    // Mock proof, `transact` rejects the deposit during verification (before
+    // `settle_transact` is reached), so the proof itself never needs to be
+    // valid.
     let proof = Proof {
         proof: mk_mock_groth16_proof(&env),
         root: pool.get_root(),
@@ -2095,7 +2096,10 @@ fn transact_reports_verifier_rejection_as_invalid_proof() {
     );
 }
 
-/// A verifier rejection must roll back the deposit transfer.
+/// A deposit whose proof the verifier refuses must not move funds, not even
+/// transiently inside the reverted call: `transact` runs every check first
+/// and collects the deposit only afterwards (checks-effects-interactions),
+/// so the token transfer is never even attempted when verification fails.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn transact_rejects_deposit_with_invalid_proof_without_moving_funds() {
@@ -2150,6 +2154,9 @@ fn transact_rejects_deposit_with_invalid_proof_without_moving_funds() {
     assert_eq!(token.balance(&sender), funded);
     assert_eq!(token.balance(&pool_id), 0);
 
+    use soroban_sdk::testutils::Events;
+    let events_before = env.events().all().events().len();
+
     let err = pool
         .try_transact(&proof, &deposit, &sender)
         .expect_err("a deposit carrying a proof the verifier refuses must be refused");
@@ -2170,5 +2177,14 @@ fn transact_rejects_deposit_with_invalid_proof_without_moving_funds() {
         token.balance(&pool_id),
         0,
         "a refused deposit must not credit the pool"
+    );
+
+    // The deposit transfer only runs after verification, so the refused call
+    // must not reach the token contract at all: no event of any kind may be
+    // recorded from it (the token transfer would publish one).
+    assert_eq!(
+        env.events().all().events().len(),
+        events_before,
+        "a refused deposit must not emit any token transfer event"
     );
 }

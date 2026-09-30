@@ -16,7 +16,7 @@ use crate::{
     correlation::correlation_id_or_new,
     disclosure::{
         DisclosureInputsRequest, DisclosureProveParams, DisclosureRequest,
-        verify_disclosure_receipt,
+        verify_disclosure_receipt_with_context,
     },
     error::{Error, PlanExecutionError},
     gvk::GvkAudit,
@@ -30,8 +30,8 @@ use crate::{
     transact::transact_request_from_step,
     types::{
         AspMembershipSync, DisclosureContext, DisclosureReceipt, DisclosureVerificationReport,
-        Estimate, Field, GvkMode, PrivatePoolConfig, SignedTransaction, TransactChainContext,
-        TransactionResult, TransferRecipient,
+        Estimate, ExpectedContext, Field, GvkMode, PrivatePoolConfig, SignedTransaction,
+        TransactChainContext, TransactionResult, TransferRecipient,
     },
 };
 
@@ -240,11 +240,17 @@ impl PrivatePool {
         expected_vk_hash: &str,
     ) -> Result<DisclosureVerificationReport, Error> {
         tracing::info!(expected_vk_hash = ?Sensitive(expected_vk_hash), "verify_disclosure started");
-        verify_disclosure_receipt(
+        let expected_context = ExpectedContext {
+            network: self.fetcher.contract_config().network.clone(),
+            pool_address: self.config.pool_contract_id.clone(),
+            authority: None,
+        };
+        verify_disclosure_receipt_with_context(
             &self.fetcher,
             self.prover.as_ref(),
             receipt,
             expected_vk_hash,
+            Some(&expected_context),
         )
         .await
     }
@@ -501,5 +507,279 @@ impl PrivatePool {
             .privacy_keys(self.config.user_address.as_str())
             .await?;
         self.core.deposit_transact_step(note_pub, enc_pub, amount)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        storage::LocalStorage,
+        types::{
+            AssetDescriptor, AuthorityStatus, ContextMismatchReason, DISCLOSURE_RECEIPT_VERSION,
+            DisclosureCircuitMetadata, DisclosureContext, DisclosurePublicInputs, Field,
+            KeyDerivationSignature, PoolConfigEntry, SELECTIVE_DISCLOSURE_1_CIRCUIT,
+            SELECTIVE_DISCLOSURE_1_LEVELS, SELECTIVE_DISCLOSURE_1_N_NOTES, SignerAddress, U256,
+        },
+        zk::disclosure::{derive_ext_context_hash, validate_registered_receipt},
+    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use stellar_xdr::{self as xdr, WriteXdr};
+    use wiremock::{Mock, MockServer, Respond, ResponseTemplate, matchers::method};
+
+    const VK_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
+    const POOL_A: &str = "CCM5G4FCOV7PLKFMEJBCYM5R7JOTZVUXKWBDR3SWCW2IM2LKNNBO4TH5";
+    const POOL_B: &str = "CAADTTZWMNAABQOOTGRYLPEKWGMQT746A4EF7JWMBY5TJTMUNQYB4UZ3";
+    const USER_ADDRESS: &str = "GDZT6XVSNIGMTL34KS46RM3D26GPWM4POMCBYL7FUIQXRMSVUALSWRBE";
+
+    struct TestProver;
+
+    #[async_trait::async_trait(?Send)]
+    impl Prover for TestProver {
+        async fn prove_transact(
+            &self,
+            _params: crate::zk::flows::TransactParams,
+        ) -> Result<crate::transact::PreparedProverTx, Error> {
+            unreachable!()
+        }
+
+        async fn prove_disclosure(
+            &self,
+            _params: DisclosureProveParams,
+        ) -> Result<DisclosureReceipt, Error> {
+            unreachable!()
+        }
+
+        async fn verify_disclosure_proof(
+            &self,
+            receipt: &DisclosureReceipt,
+            expected_vk_hash: &str,
+        ) -> Result<bool, Error> {
+            validate_registered_receipt(receipt, expected_vk_hash)
+                .map_err(|e| Error::Other(anyhow::anyhow!(e)))?;
+            Ok(true)
+        }
+    }
+
+    struct TestSigner;
+
+    #[async_trait::async_trait(?Send)]
+    impl Signer for TestSigner {
+        fn signer_address(&self) -> SignerAddress {
+            SignerAddress::new(USER_ADDRESS)
+        }
+
+        async fn sign_transaction(
+            &self,
+            _prepared: &PreparedTransaction,
+        ) -> Result<SignedTransaction, Error> {
+            unreachable!()
+        }
+
+        async fn sign_message(&self, _message: &str) -> Result<KeyDerivationSignature, Error> {
+            unreachable!()
+        }
+    }
+
+    struct SimResponder;
+
+    impl Respond for SimResponder {
+        fn respond(&self, request: &wiremock::Request) -> ResponseTemplate {
+            let json: serde_json::Value = serde_json::from_slice(&request.body).unwrap_or_default();
+            let mut is_spent = false;
+            let tx_b64 = json["params"]["transaction"]
+                .as_str()
+                .or_else(|| json["params"][0].as_str());
+            if let Some(b64) = tx_b64
+                && let Ok(xdr::TransactionEnvelope::Tx(tx)) =
+                    xdr::TransactionEnvelope::from_xdr_base64(b64, xdr::Limits::none())
+                && let Some(op) = tx.tx.operations.first()
+                && let xdr::OperationBody::InvokeHostFunction(invoke) = &op.body
+                && let xdr::HostFunction::InvokeContract(args) = &invoke.host_function
+                && args.function_name.0.as_slice() == b"is_spent"
+            {
+                is_spent = true;
+            }
+
+            let retval = xdr::ScVal::Bool(!is_spent)
+                .to_xdr_base64(xdr::Limits::none())
+                .expect("xdr");
+
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "latestLedger": 1,
+                    "results": [{
+                        "retval": retval
+                    }]
+                }
+            }))
+        }
+    }
+
+    fn field(v: u64) -> Field {
+        Field(U256::from(v))
+    }
+
+    fn valid_verified_receipt_for_pool(pool_address: &str) -> DisclosureReceipt {
+        let mut receipt = DisclosureReceipt {
+            version: DISCLOSURE_RECEIPT_VERSION,
+            circuit: DisclosureCircuitMetadata {
+                name: SELECTIVE_DISCLOSURE_1_CIRCUIT.to_string(),
+                levels: SELECTIVE_DISCLOSURE_1_LEVELS,
+                n_notes: SELECTIVE_DISCLOSURE_1_N_NOTES,
+                vk_hash: VK_HASH.to_string(),
+            },
+            context: DisclosureContext {
+                network: "testnet".to_string(),
+                pool_address: pool_address.to_string(),
+                authority_label: "Authority XYZ".to_string(),
+                authority_identity_payload_hex: "0x617574686f72697479".to_string(),
+                purpose: "kyc-review".to_string(),
+                context_nonce: field(7),
+            },
+            public_inputs: DisclosurePublicInputs {
+                roots: vec![field(1)],
+                note_commitments: vec![field(2)],
+                ext_context_hash: field(3),
+                nullifiers: vec![field(4)],
+                amounts: vec![field(5)],
+            },
+            proof_compressed_hex: format!("0x{}", "aa".repeat(128)),
+            issued_at: "2026-05-19T14:00:00Z".to_string(),
+        };
+        receipt.public_inputs.ext_context_hash =
+            derive_ext_context_hash(&receipt.context).expect("derive hash");
+        receipt
+    }
+
+    use crate::{handle::Handle, storage::Storage};
+    async fn create_test_pool(server: &MockServer) -> PrivatePool {
+        static RUN: AtomicUsize = AtomicUsize::new(0);
+        let db = std::env::temp_dir().join(format!(
+            "spp-pool-verify-test-{}-{}.sqlite",
+            std::process::id(),
+            RUN.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_file(&db);
+        let storage = LocalStorage::open(db.to_string_lossy().as_ref()).expect("open storage");
+
+        let contract_config = crate::types::ContractConfig {
+            network: "testnet".to_string(),
+            deployer: USER_ADDRESS.to_string(),
+            admin: String::new(),
+            asp_membership: String::new(),
+            asp_non_membership: String::new(),
+            verifiers: Default::default(),
+            public_key_registry: String::new(),
+            pools: vec![PoolConfigEntry {
+                pool_contract_id: POOL_A.to_string(),
+                token_contract_id: "CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC"
+                    .to_string(),
+                deployment_ledger: 1,
+                enabled: true,
+                policy_flags: crate::types::PolicyFlags::EMPTY,
+                asset: AssetDescriptor::Native,
+                gvk_mode: crate::types::GvkMode::Off,
+                gvk_authority_pub_key: None,
+            }],
+        };
+
+        let config = PrivatePoolConfig {
+            contract_config,
+            pool_contract_id: POOL_A.to_string(),
+            user_address: crate::types::NoteOwnerAddress::new(USER_ADDRESS),
+            signer_address: SignerAddress::new(USER_ADDRESS),
+        };
+
+        let rpc = RpcClient::new(&server.uri()).expect("rpc client");
+        let signer = Handle::from_box(Box::new(TestSigner) as Box<dyn Signer>);
+        let prover = Handle::from_box(Box::new(TestProver) as Box<dyn Prover>);
+        let sync = SyncHandle::inline(None);
+
+        let storage: Handle<dyn Storage> = {
+            let boxed: Box<dyn Storage> = Box::new(storage);
+            Handle::from(boxed)
+        };
+
+        PrivatePool::init(rpc, config, storage, signer, prover, sync).expect("init pool")
+    }
+
+    #[tokio::test]
+    async fn verify_disclosure_valid_receipt_for_configured_pool() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(SimResponder)
+            .mount(&server)
+            .await;
+
+        let pool = create_test_pool(&server).await;
+        let receipt = valid_verified_receipt_for_pool(POOL_A);
+
+        let report = pool
+            .verify_disclosure(&receipt, VK_HASH)
+            .await
+            .expect("verify disclosure");
+
+        assert!(report.is_cryptographically_valid());
+        assert_eq!(report.authority_status, AuthorityStatus::Unchecked);
+        assert!(report.context_mismatches.is_empty());
+        assert!(report.proof_verified);
+        assert!(report.context_verified);
+        assert!(report.known_root_status);
+        assert!(report.nullifiers_unspent);
+    }
+
+    #[tokio::test]
+    async fn verify_disclosure_receipt_for_different_pool_address() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(SimResponder)
+            .mount(&server)
+            .await;
+
+        let pool = create_test_pool(&server).await;
+        let receipt = valid_verified_receipt_for_pool(POOL_B);
+
+        let report = pool
+            .verify_disclosure(&receipt, VK_HASH)
+            .await
+            .expect("verify disclosure");
+
+        assert!(!report.is_cryptographically_valid());
+        assert_eq!(
+            report.context_mismatches,
+            vec![ContextMismatchReason::PoolMismatch]
+        );
+        assert_eq!(report.authority_status, AuthorityStatus::Unchecked);
+        assert!(report.proof_verified);
+        assert!(report.context_verified);
+    }
+
+    #[tokio::test]
+    async fn verify_disclosure_malformed_pool_address_returns_mismatch() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(SimResponder)
+            .mount(&server)
+            .await;
+
+        let pool = create_test_pool(&server).await;
+        let receipt = valid_verified_receipt_for_pool("invalid-pool-address");
+
+        let report = pool
+            .verify_disclosure(&receipt, VK_HASH)
+            .await
+            .expect("verify disclosure");
+
+        assert!(!report.is_cryptographically_valid());
+        assert_eq!(
+            report.context_mismatches,
+            vec![ContextMismatchReason::PoolMismatch]
+        );
+        assert_eq!(report.authority_status, AuthorityStatus::Unchecked);
+        assert!(report.proof_verified);
+        assert!(report.context_verified);
     }
 }

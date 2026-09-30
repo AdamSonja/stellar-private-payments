@@ -1,0 +1,132 @@
+name: CI debug report
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --component rustfmt --profile minimal
+
+      - name: Fmt report (root workspace)
+        run: |
+          set +e
+          cargo +nightly fmt --all -- --check --config-path rustfmt.toml > /tmp/fmt_root.txt 2>&1
+          echo "exit=$?" >> /tmp/fmt_root.txt
+          exit 0
+
+      - name: Fmt annotations (root workspace)
+        run: |
+          python3 - <<'PY'
+          import re
+          txt = open('/tmp/fmt_root.txt').read()
+          hunks = re.split(r'(?m)^(?=Diff in )', txt)
+          n = 0
+          for h in hunks:
+              m = re.match(r'Diff in (.+?)(?:: at line |:)(\d+):', h)
+              if not m:
+                  continue
+              n += 1
+              if n > 9:
+                  print("::warning::more fmt diffs exist in root workspace (truncated at 9)")
+                  break
+              f, ln = m.group(1).replace('/home/runner/work/stellar-private-payments/stellar-private-payments/', ''), m.group(2)
+              body = h[:700].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f"::error file={f},line={ln},title=root fmt mismatch::{body}")
+          if n == 0:
+              head = txt[:900].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f"::notice::root fmt produced no 'Diff in' hunks; raw output head::{head}")
+          exit_line = [l for l in txt.splitlines() if l.startswith('exit=')]
+          print(f"::notice::root fmt {exit_line[-1] if exit_line else 'no-output'}; hunks emitted: {min(n, 9)}")
+          PY
+
+      - name: Fmt report (integration-tests workspace)
+        working-directory: integration-tests
+        run: |
+          set +e
+          cargo +nightly fmt --all -- --check --config-path ../rustfmt.toml > /tmp/fmt_it.txt 2>&1
+          echo "exit=$?" >> /tmp/fmt_it.txt
+          exit 0
+
+      - name: Fmt annotations (integration-tests workspace)
+        run: |
+          python3 - <<'PY'
+          import re
+          txt = open('/tmp/fmt_it.txt').read()
+          hunks = re.split(r'(?m)^(?=Diff in )', txt)
+          n = 0
+          for h in hunks:
+              m = re.match(r'Diff in (.+?)(?:: at line |:)(\d+):', h)
+              if not m:
+                  continue
+              n += 1
+              if n > 9:
+                  print("::warning::more fmt diffs exist in integration-tests (truncated at 9)")
+                  break
+              f, ln = m.group(1).replace('/home/runner/work/stellar-private-payments/stellar-private-payments/', ''), m.group(2)
+              body = h[:700].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f"::error file={f},line={ln},title=integration-tests fmt mismatch::{body}")
+          if n == 0:
+              head = txt[:900].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f"::notice::integration-tests fmt produced no 'Diff in' hunks; raw output head::{head}")
+          exit_line = [l for l in txt.splitlines() if l.startswith('exit=')]
+          print(f"::notice::integration-tests fmt {exit_line[-1] if exit_line else 'no-output'}; hunks emitted: {min(n, 9)}")
+          PY
+
+      - name: Build circuit artifacts
+        run: make circuits
+
+      - name: Cargo check (workspace, all targets)
+        run: |
+          set +e
+          cargo check --workspace --all-targets > /tmp/check.txt 2>&1
+          echo "exit=$?" >> /tmp/check.txt
+          exit 0
+
+      - name: Check annotations
+        run: |
+          python3 - <<'PY'
+          import re
+          lines = open('/tmp/check.txt').read().splitlines()
+          emitted = 0
+          i = 0
+          while i < len(lines):
+              m = re.match(r'^(error(?:\[[^\]]+\])?: .*)$', lines[i])
+              if m:
+                  loc = ""
+                  detail = []
+                  for j in range(i + 1, min(i + 15, len(lines))):
+                      if re.match(r'^(error|warning)\b', lines[j]):
+                          break
+                      lm = re.match(r'\s*--> (.*):(\d+):(\d+)', lines[j])
+                      if lm and not loc:
+                          loc = f"file={lm.group(1)},line={lm.group(2)},col={lm.group(3)}"
+                      if lines[j].strip() and not lines[j].startswith('note: run with'):
+                          detail.append(lines[j].strip())
+                  msg = (m.group(1)[:300] + ' | ' + ' // '.join(detail[1:5]))[:600]
+                  msg = msg.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                  print(f"::error {loc}::{msg}")
+                  emitted += 1
+                  if emitted >= 9:
+                      print("::warning::more errors exist (truncated at 9)")
+                      break
+              i += 1
+          exit_line = [l for l in lines if l.startswith('exit=')]
+          print(f"::notice::cargo check {exit_line[-1] if exit_line else 'no-output'}; errors emitted: {emitted}")
+          PY
