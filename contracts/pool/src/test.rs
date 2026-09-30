@@ -33,7 +33,7 @@ fn mk_ext_data(env: &Env, recipient: Address, ext_amount: i32) -> ExtData {
     }
 }
 
-/// Computes the hash `internal_transact` checks the proof against, by calling
+/// Computes the hash `verify_transact` checks the proof against, by calling
 /// the real `hash_ext_data` inside `pool`'s contract frame rather than
 /// reimplementing the encoding.
 fn compute_ext_hash(env: &Env, pool: &Address, token: &Address, ext: &ExtData) -> BytesN<32> {
@@ -1886,9 +1886,10 @@ fn transact_reports_verifier_rejection_as_invalid_proof() {
     );
 }
 
-/// A deposit whose proof the verifier refuses must revert whole. `transact`
-/// moves the tokens before `internal_transact` checks anything, so the sender
-/// keeps their balance only if the failed call is rolled back.
+/// A deposit whose proof the verifier refuses must not move funds, not even
+/// transiently inside the reverted call: `transact` runs every check first
+/// and collects the deposit only afterwards (checks-effects-interactions),
+/// so the token transfer is never even attempted when verification fails.
 #[test]
 #[cfg_attr(miri, ignore)]
 fn transact_rejects_deposit_with_invalid_proof_without_moving_funds() {
@@ -1927,13 +1928,17 @@ fn transact_rejects_deposit_with_invalid_proof_without_moving_funds() {
     assert_eq!(token.balance(&sender), funded);
     assert_eq!(token.balance(&pool_id), 0);
 
+    use soroban_sdk::testutils::Events;
+    let events_before = env.events().all().len();
+
     let err = pool
         .try_transact(&proof, &deposit, &sender)
         .expect_err("a deposit carrying a proof the verifier refuses must be refused");
     assert_eq!(
         err,
         Ok(Error::InvalidProof),
-        "the deposit bound must not answer first, or the transfer is never reached"
+        "the transaction must be refused by proof verification itself, \
+         not by an earlier parameter check"
     );
     assert_eq!(
         token.balance(&sender),
@@ -1944,6 +1949,14 @@ fn transact_rejects_deposit_with_invalid_proof_without_moving_funds() {
         token.balance(&pool_id),
         0,
         "a refused deposit must not credit the pool"
+    );
+    // The deposit transfer only runs after verification, so the refused call
+    // must not reach the token contract at all: no event of any kind may be
+    // recorded from it (the token transfer would publish one).
+    assert_eq!(
+        env.events().all().len(),
+        events_before,
+        "a refused deposit must not emit any token transfer event"
     );
 }
 

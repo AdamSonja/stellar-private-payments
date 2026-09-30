@@ -62,3 +62,82 @@ pub fn calculate_public_amount(env: &Env, ext_amount: I256) -> Option<U256> {
 pub fn is_canonical_bn256_public_input(value: &U256, modulus: &U256) -> bool {
     value < modulus
 }
+
+/// `i256_to_i128_nonneg` mapped onto the caller's error domain.
+///
+/// # Errors
+///
+/// Returns [`PoolError::wrong_ext_amount`] if `v` is negative or exceeds
+/// `i128`.
+pub fn require_i128_nonneg<E: PoolError>(env: &Env, v: &I256) -> Result<i128, E> {
+    i256_to_i128_nonneg(env, v).ok_or_else(E::wrong_ext_amount)
+}
+
+/// `calculate_public_amount` mapped onto the caller's error domain.
+///
+/// # Errors
+///
+/// Returns [`PoolError::wrong_ext_amount`] if `|ext_amount|` exceeds the
+/// 2^248 bound.
+pub fn require_public_amount<E: PoolError>(env: &Env, ext_amount: I256) -> Result<U256, E> {
+    calculate_public_amount(env, ext_amount).ok_or_else(E::wrong_ext_amount)
+}
+
+/// Reject a value outside the canonical BN254 scalar-field range.
+///
+/// `Bn254Fr::from_bytes` expects field elements, so any `U256` that will be
+/// converted into a verifier public input must be checked before conversion.
+///
+/// # Errors
+///
+/// Returns [`PoolError::non_canonical_public_input`] if `value` is at least
+/// `modulus`.
+pub fn require_canonical_bn256_input<E: PoolError>(value: &U256, modulus: &U256) -> Result<(), E> {
+    if is_canonical_bn256_public_input(value, modulus) {
+        Ok(())
+    } else {
+        Err(E::non_canonical_public_input())
+    }
+}
+
+/// Validate every `U256` field of a transact proof that contributes to the
+/// verifier's public-input vector: root, public amount, input nullifiers,
+/// both output commitments, and the ASP roots the policy flags enable.
+///
+/// The transaction path checks `ext_data_hash` against `hash_ext_data`
+/// before proof verification, so this covers the remaining public-input
+/// values. Contract-specific extra fields (pool-gvk's ciphertexts) are
+/// validated by the caller on top.
+///
+/// # Errors
+///
+/// Returns [`PoolError::non_canonical_public_input`] on the first
+/// non-canonical field.
+#[allow(clippy::too_many_arguments)]
+pub fn require_canonical_transact_inputs<E: PoolError>(
+    root: &U256,
+    public_amount: &U256,
+    input_nullifiers: &Vec<U256>,
+    output_commitment0: &U256,
+    output_commitment1: &U256,
+    asp_membership_root: &U256,
+    asp_non_membership_root: &U256,
+    policy_flags: u32,
+    modulus: &U256,
+) -> Result<(), E> {
+    require_canonical_bn256_input(root, modulus)?;
+    require_canonical_bn256_input(public_amount, modulus)?;
+    for nullifier in input_nullifiers.iter() {
+        require_canonical_bn256_input(nullifier, modulus)?;
+    }
+    require_canonical_bn256_input(output_commitment0, modulus)?;
+    require_canonical_bn256_input(output_commitment1, modulus)?;
+    if policy::requires_membership_proofs(policy_flags) {
+        require_canonical_bn256_input(asp_membership_root, modulus)?;
+    }
+    if policy::requires_non_membership_proofs(policy_flags) {
+        require_canonical_bn256_input(asp_non_membership_root, modulus)?;
+    }
+
+    Ok(())
+}

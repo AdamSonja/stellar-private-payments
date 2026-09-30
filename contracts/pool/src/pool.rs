@@ -16,8 +16,9 @@
 use contract_types::Groth16Proof;
 use pool_core::{
     ASPMembershipClient, ASPNonMembershipClient, CircomGroth16VerifierClient, amounts,
+    error::PoolError,
     merkle_with_history::{Error as MerkleError, MerkleTreeWithHistory},
-    policy,
+    policy, storage,
 };
 use soroban_sdk::{
     Address, Bytes, BytesN, Env, I256, U256, Vec, contract, contracterror, contractevent,
@@ -69,14 +70,35 @@ pub enum Error {
 /// Errors from MerkleTreeWithHistory are not `contracterror`
 impl From<MerkleError> for Error {
     fn from(e: MerkleError) -> Self {
-        match e {
-            MerkleError::AlreadyInitialized => Error::AlreadyInitialized,
-            MerkleError::MerkleTreeFull => Error::MerkleTreeFull,
-            MerkleError::WrongLevels => Error::WrongLevels,
-            MerkleError::NextIndexNotEven => Error::NextIndexNotEven,
-            MerkleError::NotInitialized => Error::NotInitialized,
-            MerkleError::Overflow => Error::Overflow,
-        }
+        PoolError::from_merkle(e)
+    }
+}
+
+/// The shared `pool-core` helpers raise this contract's own variants.
+impl PoolError for Error {
+    fn already_initialized() -> Self {
+        Self::AlreadyInitialized
+    }
+    fn wrong_levels() -> Self {
+        Self::WrongLevels
+    }
+    fn merkle_tree_full() -> Self {
+        Self::MerkleTreeFull
+    }
+    fn next_index_not_even() -> Self {
+        Self::NextIndexNotEven
+    }
+    fn not_initialized() -> Self {
+        Self::NotInitialized
+    }
+    fn overflow() -> Self {
+        Self::Overflow
+    }
+    fn wrong_ext_amount() -> Self {
+        Self::WrongExtAmount
+    }
+    fn non_canonical_public_input() -> Self {
+        Self::NonCanonicalPublicInput
     }
 }
 
@@ -222,94 +244,6 @@ impl PoolContract {
         Ok(())
     }
 
-    /// Convert a non-negative I256 to i128 with bounds checking
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban environment
-    /// * `v` - The I256 value to convert
-    ///
-    /// # Returns
-    ///
-    /// Returns `Ok(i128)` if the value is non-negative and fits in i128,
-    /// or `Err(Error::WrongExtAmount)` otherwise
-    fn i256_to_i128_nonneg(env: &Env, v: &I256) -> Result<i128, Error> {
-        amounts::i256_to_i128_nonneg(env, v).ok_or(Error::WrongExtAmount)
-    }
-
-    /// Calculate the public amount from external amount
-    ///
-    /// Computes `public_amount = ext_amount` in the BN256 field.
-    /// For positive results, returns the value directly.
-    /// For negative results, returns `FIELD_SIZE - |public_amount|`.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban environment
-    /// * `ext_amount` - External amount (positive for deposit, negative for
-    ///   withdrawal)
-    ///
-    /// # Returns
-    ///
-    /// Returns the public amount as U256 in the BN256 field, or an error
-    /// if the amounts exceed limits
-    fn calculate_public_amount(env: &Env, ext_amount: I256) -> Result<U256, Error> {
-        amounts::calculate_public_amount(env, ext_amount).ok_or(Error::WrongExtAmount)
-    }
-
-    /// Mark a nullifier as spent
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban environment
-    /// * `n` - The nullifier to mark as spent
-    fn mark_spent(env: &Env, n: &U256) -> Result<(), Error> {
-        let key = DataKey::Nullifier(n.clone());
-        // Presence of the key is the spent flag; value is unused.
-        env.storage().persistent().set(&key, &());
-        Ok(())
-    }
-
-    /// Reject values outside the canonical BN254 scalar-field range.
-    ///
-    /// `Bn254Fr::from_bytes` expects field elements, so any `U256` that will be
-    /// converted into a verifier public input must be checked before
-    /// conversion.
-    fn validate_bn256_public_input(value: &U256, modulus: &U256) -> Result<(), Error> {
-        if amounts::is_canonical_bn256_public_input(value, modulus) {
-            Ok(())
-        } else {
-            Err(Error::NonCanonicalPublicInput)
-        }
-    }
-
-    /// Validate every `U256` field that contributes to the verifier's public
-    /// input vector. The transaction path checks `ext_data_hash` against
-    /// `hash_ext_data` before proof verification, so this covers the remaining
-    /// public-input values.
-    fn validate_bn256_public_inputs(
-        _env: &Env,
-        proof: &Proof,
-        policy_flags: u32,
-        modulus: &U256,
-    ) -> Result<(), Error> {
-        Self::validate_bn256_public_input(&proof.root, modulus)?;
-        Self::validate_bn256_public_input(&proof.public_amount, modulus)?;
-        for nullifier in proof.input_nullifiers.iter() {
-            Self::validate_bn256_public_input(&nullifier, modulus)?;
-        }
-        Self::validate_bn256_public_input(&proof.output_commitment0, modulus)?;
-        Self::validate_bn256_public_input(&proof.output_commitment1, modulus)?;
-        if policy::requires_membership_proofs(policy_flags) {
-            Self::validate_bn256_public_input(&proof.asp_membership_root, modulus)?;
-        }
-        if policy::requires_non_membership_proofs(policy_flags) {
-            Self::validate_bn256_public_input(&proof.asp_non_membership_root, modulus)?;
-        }
-
-        Ok(())
-    }
-
     /// Verify a zero-knowledge proof
     ///
     /// # Arguments
@@ -331,7 +265,17 @@ impl PoolContract {
         let policy_flags = Self::load_policy_flags(env)?;
         let verifier = Self::get_verifier(env)?;
         let client = CircomGroth16VerifierClient::new(env, &verifier);
-        Self::validate_bn256_public_inputs(env, proof, policy_flags, &bn256_modulus(env))?;
+        amounts::require_canonical_transact_inputs::<Error>(
+            &proof.root,
+            &proof.public_amount,
+            &proof.input_nullifiers,
+            &proof.output_commitment0,
+            &proof.output_commitment1,
+            &proof.asp_membership_root,
+            &proof.asp_non_membership_root,
+            policy_flags,
+            &bn256_modulus(env),
+        )?;
 
         // Public inputs must match the policy circuit:
         // [root, public_amount, ext_data_hash, input_nullifiers,
@@ -388,30 +332,13 @@ impl PoolContract {
         }
     }
 
-    /// Hash external data using Keccak256, bound to this pool and its token
-    ///
-    /// Serializes the external data together with this contract's address and
-    /// configured token to XDR, hashes with Keccak256, and reduces the result
-    /// modulo the BN256 field size.
-    ///
-    /// # Arguments
-    ///
-    /// * `env` - The Soroban environment
-    /// * `ext` - The external data to hash
-    /// * `token` - This pool's own configured token address
-    ///
-    /// # Returns
-    ///
-    /// Returns the 32-byte hash of the external data
-    fn hash_ext_data(env: &Env, ext: &ExtData, token: &Address) -> BytesN<32> {
-        hash_ext_data(env, ext, token)
-    }
-
     /// Execute a shielded transaction with deposit handling
     ///
     /// This is the main entry point for users to interact with the pool.
-    /// If `ext_amount > 0`, tokens are transferred from the sender to the pool
-    /// before processing the transaction.
+    /// If `ext_amount > 0`, tokens are transferred from the sender to the
+    /// pool only after the transaction has been fully verified
+    /// (checks-effects-interactions: no token may move while any check can
+    /// still fail).
     ///
     /// # Arguments
     ///
@@ -431,14 +358,17 @@ impl PoolContract {
         sender: Address,
     ) -> Result<(), Error> {
         sender.require_auth();
-        // The tree entry is rewritten below; keep the configuration it
-        // reads on the same lifetime.
+        // The tree entry is rewritten in `settle_transact` below; keep the
+        // configuration it reads on the same lifetime.
         pool_core::extend_instance(env);
-        let token = Self::get_token(env)?;
-        let token_client = TokenClient::new(env, &token);
-        let zero = I256::from_i32(env, 0);
 
-        // Handle deposit if ext_amount > 0
+        // CHECKS: verify the transaction fully before any token moves.
+        Self::verify_transact(env, &proof, &ext_data)?;
+
+        // INTERACTION: collect the deposit only after every check has
+        // passed, so a transaction that fails verification never even
+        // attempts the transfer.
+        let zero = I256::from_i32(env, 0);
         if ext_data.ext_amount > zero {
             let deposit_u = U256::from_be_bytes(env, &ext_data.ext_amount.to_be_bytes());
             let max = Self::get_maximum_deposit(env)?;
@@ -446,17 +376,20 @@ impl PoolContract {
                 return Err(Error::WrongExtAmount);
             }
             let this = env.current_contract_address();
-            let amount = Self::i256_to_i128_nonneg(env, &ext_data.ext_amount)?;
-            token_client.transfer(&sender, &this, &amount);
+            let amount = amounts::require_i128_nonneg(env, &ext_data.ext_amount)?;
+            let token = Self::get_token(env)?;
+            TokenClient::new(env, &token).transfer(&sender, &this, &amount);
         }
 
-        Self::internal_transact(env, proof, ext_data)
+        // EFFECTS: spend nullifiers, pay out withdrawals, insert commitments.
+        Self::settle_transact(env, proof, ext_data)
     }
 
-    /// Process a private transaction
+    /// Verify a private transaction without mutating any state
     ///
-    /// Validates the proof and all public inputs, marks nullifiers as spent,
-    /// processes withdrawals, and inserts new commitments into the Merkle tree.
+    /// Validates the proof and all public inputs. Split from the
+    /// bookkeeping so `transact` can run every check (including the ZK
+    /// proof) before its deposit transfer — checks first, effects after.
     ///
     /// # Arguments
     ///
@@ -475,7 +408,7 @@ impl PoolContract {
     /// 3. Verify external data hash matches
     /// 4. Verify public amount calculation
     /// 5. Verify zero-knowledge proof
-    fn internal_transact(env: &Env, proof: Proof, ext_data: ExtData) -> Result<(), Error> {
+    fn verify_transact(env: &Env, proof: &Proof, ext_data: &ExtData) -> Result<(), Error> {
         // 1. Merkle root check
         if !MerkleTreeWithHistory::is_known_root(env, &proof.root)? {
             return Err(Error::UnknownRoot);
@@ -490,14 +423,14 @@ impl PoolContract {
         // own configured token, so a hash computed for another pool or token
         // cannot match here.
         let token = Self::get_token(env)?;
-        let ext_hash = Self::hash_ext_data(env, &ext_data, &token);
+        let ext_hash = hash_ext_data(env, ext_data, &token);
         if ext_hash != proof.ext_data_hash {
             return Err(Error::WrongExtHash);
         }
 
         // 4. Public amount check
         let expected_public_amount =
-            Self::calculate_public_amount(env, ext_data.ext_amount.clone())?;
+            amounts::require_public_amount(env, ext_data.ext_amount.clone())?;
         if proof.public_amount != expected_public_amount {
             return Err(Error::WrongExtAmount);
         }
@@ -518,17 +451,36 @@ impl PoolContract {
         }
 
         // 5. ZK proof verification
-        if !Self::verify_proof(env, &proof)? {
+        if !Self::verify_proof(env, proof)? {
             return Err(Error::InvalidProof);
         }
 
-        // 6. Mark nullifiers as spent
+        Ok(())
+    }
+
+    /// Apply a verified private transaction
+    ///
+    /// Marks nullifiers as spent, processes withdrawals, and inserts new
+    /// commitments into the Merkle tree. Runs only after `verify_transact`
+    /// accepted the transaction.
+    ///
+    /// # Arguments
+    ///
+    /// * `env` - The Soroban environment
+    /// * `proof` - Zero-knowledge proof and public inputs (already verified)
+    /// * `ext_data` - External transaction data (already verified)
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on success
+    fn settle_transact(env: &Env, proof: Proof, ext_data: ExtData) -> Result<(), Error> {
+        // 1. Mark nullifiers as spent
         for n in proof.input_nullifiers.iter() {
-            let _ = Self::mark_spent(env, &n);
+            storage::persistent_set_unit(env, &DataKey::Nullifier(n.clone()));
             NewNullifierEvent { nullifier: n }.publish(env);
         }
 
-        // 7. Process withdrawal if ext_amount < 0
+        // 2. Process withdrawal if ext_amount < 0
         let token = Self::get_token(env)?;
         let token_client = TokenClient::new(env, &token);
         let this = env.current_contract_address();
@@ -536,18 +488,18 @@ impl PoolContract {
 
         if ext_data.ext_amount < zero {
             let abs = zero.sub(&ext_data.ext_amount);
-            let amount: i128 = Self::i256_to_i128_nonneg(env, &abs)?;
+            let amount: i128 = amounts::require_i128_nonneg(env, &abs)?;
             token_client.transfer(&this, &ext_data.recipient, &amount);
         }
 
-        // 9. Insert new commitments into Merkle tree
+        // 3. Insert new commitments into Merkle tree
         let (idx_0, idx_1) = MerkleTreeWithHistory::insert_two_leaves(
             env,
             proof.output_commitment0.clone(),
             proof.output_commitment1.clone(),
         )?;
 
-        // 10. Emit commitment events
+        // 4. Emit commitment events
         NewCommitmentEvent {
             commitment: proof.output_commitment0,
             index: idx_0,
@@ -569,34 +521,22 @@ impl PoolContract {
 
     /// Get the token contract address
     fn get_token(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::Token)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::Token)
     }
 
     /// Get the maximum deposit amount
     fn get_maximum_deposit(env: &Env) -> Result<U256, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::MaximumDepositAmount)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::MaximumDepositAmount)
     }
 
     /// Get the verifier contract address
     fn get_verifier(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::Verifier)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::Verifier)
     }
 
     /// Get the admin address
     fn get_admin(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Admin)
-            .ok_or(Error::NotInitialized)
+        storage::persistent_get(env, &DataKey::Admin)
     }
 
     /// Get the pool's ASP policy flags.
@@ -605,10 +545,7 @@ impl PoolContract {
     }
 
     fn load_policy_flags(env: &Env) -> Result<u32, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::PolicyFlags)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::PolicyFlags)
     }
 
     /// Get the latest root of the Merkle tree that defines the pool
@@ -639,8 +576,7 @@ impl PoolContract {
     ///
     /// Returns `true` if the nullifier has been spent, `false` otherwise
     pub fn is_spent(env: &Env, n: &U256) -> Result<bool, Error> {
-        let key = DataKey::Nullifier(n.clone());
-        Ok(env.storage().persistent().has(&key))
+        Ok(storage::persistent_has(env, &DataKey::Nullifier(n.clone())))
     }
 
     /// Update the contract administrator
@@ -666,18 +602,12 @@ impl PoolContract {
 
     /// Get the ASP Membership contract address
     fn get_asp_membership(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::ASPMembership)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::ASPMembership)
     }
 
     /// Get the ASP Non-Membership contract address
     fn get_asp_non_membership(env: &Env) -> Result<Address, Error> {
-        env.storage()
-            .instance()
-            .get(&DataKey::ASPNonMembership)
-            .ok_or(Error::NotInitialized)
+        storage::instance_get(env, &DataKey::ASPNonMembership)
     }
 
     /// Update the ASP Membership contract address
