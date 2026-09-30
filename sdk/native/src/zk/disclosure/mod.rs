@@ -2,14 +2,15 @@
 
 use crate::{
     types::{
-        DisclosureCircuitMetadata, DisclosureContext, DisclosureReceipt,
-        DisclosureVerificationReport, Field, SELECTIVE_DISCLOSURE_1_CIRCUIT,
-        SELECTIVE_DISCLOSURE_1_LEVELS, SELECTIVE_DISCLOSURE_1_N_NOTES,
-        SELECTIVE_DISCLOSURE_2_CIRCUIT, SELECTIVE_DISCLOSURE_2_LEVELS,
-        SELECTIVE_DISCLOSURE_2_N_NOTES, SELECTIVE_DISCLOSURE_3_CIRCUIT,
-        SELECTIVE_DISCLOSURE_3_LEVELS, SELECTIVE_DISCLOSURE_3_N_NOTES,
-        SELECTIVE_DISCLOSURE_4_CIRCUIT, SELECTIVE_DISCLOSURE_4_LEVELS,
-        SELECTIVE_DISCLOSURE_4_N_NOTES, Sensitive, correlation_id_or_new,
+        AuthorityStatus, ContextMismatchReason, DisclosureCircuitMetadata, DisclosureContext,
+        DisclosureReceipt, DisclosureVerificationReport, ExpectedContext, Field,
+        SELECTIVE_DISCLOSURE_1_CIRCUIT, SELECTIVE_DISCLOSURE_1_LEVELS,
+        SELECTIVE_DISCLOSURE_1_N_NOTES, SELECTIVE_DISCLOSURE_2_CIRCUIT,
+        SELECTIVE_DISCLOSURE_2_LEVELS, SELECTIVE_DISCLOSURE_2_N_NOTES,
+        SELECTIVE_DISCLOSURE_3_CIRCUIT, SELECTIVE_DISCLOSURE_3_LEVELS,
+        SELECTIVE_DISCLOSURE_3_N_NOTES, SELECTIVE_DISCLOSURE_4_CIRCUIT,
+        SELECTIVE_DISCLOSURE_4_LEVELS, SELECTIVE_DISCLOSURE_4_N_NOTES, Sensitive,
+        correlation_id_or_new,
     },
     zk::prover::{Prover, verify_proof},
 };
@@ -610,7 +611,148 @@ where
     Ok(true)
 }
 
+/// Canonicalizes a Stellar address string (contract or account) using
+/// `stellar-strkey`. Returns the canonical StrKey string, or trimmed input if
+/// decoding fails.
+fn canonical_stellar_address(addr: &str) -> String {
+    let trimmed = addr.trim();
+    if let Ok(contract) = stellar_strkey::Contract::from_string(trimmed) {
+        return contract.to_string().as_str().to_string();
+    }
+    if let Ok(pk) = stellar_strkey::ed25519::PublicKey::from_string(trimmed) {
+        return pk.to_string().as_str().to_string();
+    }
+    trimmed.to_string()
+}
+
+/// Normalizes a hex string by lowercasing and stripping any leading `0x`
+/// prefix.
+fn canonical_hex(hex_str: &str) -> String {
+    let trimmed = hex_str.trim().to_ascii_lowercase();
+    if let Some(stripped) = trimmed.strip_prefix("0x") {
+        stripped.to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// Validates that a receipt's context matches expected verifier context.
+///
+/// Compares:
+/// 1. Pool address (normalized to canonical Stellar StrKey)
+/// 2. Network (trimmed like-with-like string comparison)
+/// 3. Authority (identity payload hex lowercased; optional label if specified)
+///
+/// Returns all mismatch reasons collected and the authority check outcome.
+pub fn verify_receipt_expected_context(
+    receipt: &DisclosureReceipt,
+    expected: &ExpectedContext,
+) -> (Vec<ContextMismatchReason>, AuthorityStatus) {
+    let mut mismatches = Vec::new();
+
+    let receipt_pool = canonical_stellar_address(&receipt.context.pool_address);
+    let expected_pool = canonical_stellar_address(&expected.pool_address);
+    if receipt_pool != expected_pool {
+        mismatches.push(ContextMismatchReason::PoolMismatch);
+    }
+
+    if receipt.context.network.trim() != expected.network.trim() {
+        mismatches.push(ContextMismatchReason::NetworkMismatch);
+    }
+
+    let authority_status = match &expected.authority {
+        None => AuthorityStatus::Unchecked,
+        Some(expected_auth) => {
+            let payload_matches = canonical_hex(&expected_auth.identity_payload_hex)
+                == canonical_hex(&receipt.context.authority_identity_payload_hex);
+            let label_matches = match &expected_auth.label {
+                Some(label) => label.trim() == receipt.context.authority_label.trim(),
+                None => true,
+            };
+            if payload_matches && label_matches {
+                AuthorityStatus::Matched
+            } else {
+                mismatches.push(ContextMismatchReason::AuthorityMismatch);
+                AuthorityStatus::Mismatch
+            }
+        }
+    };
+
+    (mismatches, authority_status)
+}
+
+/// Builds a disclosure verification report by combining proof, root, and
+/// expected context checks.
+///
+/// # Arguments
+/// * `receipt` - Disclosure receipt to verify.
+/// * `expected_vk_hash` - Verifying-key hash expected by the caller.
+/// * `expected_context` - Optional expected pool/network/authority context.
+/// * `verify_proof` - Proof-verification function.
+/// * `context_verified` - Result of context-hash verification
+///   (`ext_context_hash` consistency).
+/// * `is_known_root` - Root freshness predicate.
+///
+/// # Returns
+/// Returns a report that tracks proof-validity, root-freshness status, and
+/// context mismatches.
+///
+/// # Errors
+/// Returns an error if receipt metadata is invalid or if callbacks fail.
+#[tracing::instrument(name = "verify_receipt_report_with_expected_context", skip_all, fields(correlation_id = %correlation_id_or_new(), expected_vk_hash = ?Sensitive(expected_vk_hash)))]
+pub fn verify_receipt_report_with_expected_context<P, R>(
+    receipt: &DisclosureReceipt,
+    expected_vk_hash: &str,
+    expected_context: Option<&ExpectedContext>,
+    mut verify_proof: P,
+    context_verified: bool,
+    mut is_known_root: R,
+) -> Result<DisclosureVerificationReport>
+where
+    P: FnMut(&DisclosureReceipt, &str) -> Result<bool>,
+    R: FnMut(Field) -> Result<bool>,
+{
+    validate_registered_receipt(receipt, expected_vk_hash)?;
+
+    let (context_mismatches, authority_status) = match expected_context {
+        Some(expected) => verify_receipt_expected_context(receipt, expected),
+        None => (Vec::new(), AuthorityStatus::Unchecked),
+    };
+
+    let proof_verified = verify_proof(receipt, expected_vk_hash)?;
+    tracing::debug!(proof_verified, "receipt proof check outcome");
+    let known_root_status =
+        verify_receipt_known_roots_with(receipt, expected_vk_hash, &mut is_known_root)?;
+    tracing::debug!(
+        context_verified,
+        known_root_status,
+        ?context_mismatches,
+        ?authority_status,
+        "receipt context, root, and expected context checks outcome"
+    );
+
+    Ok(DisclosureVerificationReport {
+        proof_verified,
+        context_verified,
+        known_root_status,
+        // The generic disclosure crate does not perform on-chain spent-nullifier
+        // checks. Callers that need spent-status validation (e.g. the pool
+        // verifier) should perform that check separately and overwrite these
+        // fields.
+        nullifiers_unspent: true,
+        spent_nullifier_indices: Vec::new(),
+        context_mismatches,
+        authority_status,
+    })
+}
+
 /// Builds a disclosure verification report by combining proof and root checks.
+///
+/// NOTE: This standalone verification function verifies internal consistency of
+/// the receipt (Groth16 proof, context hash, and known roots), but does not
+/// bind or compare the receipt's context to a verifier's expected pool,
+/// network, or authority. Use [`verify_receipt_report_with_expected_context`]
+/// to enforce expected verifier context.
 ///
 /// # Arguments
 /// * `receipt` - Disclosure receipt to verify.
@@ -629,44 +771,30 @@ where
 pub fn verify_receipt_report_with<P, R>(
     receipt: &DisclosureReceipt,
     expected_vk_hash: &str,
-    mut verify_proof: P,
+    verify_proof: P,
     context_verified: bool,
-    mut is_known_root: R,
+    is_known_root: R,
 ) -> Result<DisclosureVerificationReport>
 where
     P: FnMut(&DisclosureReceipt, &str) -> Result<bool>,
     R: FnMut(Field) -> Result<bool>,
 {
-    validate_registered_receipt(receipt, expected_vk_hash)?;
-
-    let proof_verified = verify_proof(receipt, expected_vk_hash)?;
-    tracing::debug!(proof_verified, "receipt proof check outcome");
-    let known_root_status =
-        verify_receipt_known_roots_with(receipt, expected_vk_hash, &mut is_known_root)?;
-    tracing::debug!(
+    verify_receipt_report_with_expected_context(
+        receipt,
+        expected_vk_hash,
+        None,
+        verify_proof,
         context_verified,
-        known_root_status,
-        "receipt context and root checks outcome"
-    );
-
-    Ok(DisclosureVerificationReport {
-        proof_verified,
-        context_verified,
-        known_root_status,
-        // The generic disclosure crate does not perform on-chain spent-nullifier
-        // checks. Callers that need spent-status validation (e.g. the pool
-        // verifier) should perform that check separately and overwrite these
-        // fields.
-        nullifiers_unspent: true,
-        spent_nullifier_indices: Vec::new(),
-    })
+        is_known_root,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::{
-        DISCLOSURE_RECEIPT_VERSION, DisclosureContext, DisclosurePublicInputs, Field, U256,
+        AuthorityStatus, ContextMismatchReason, DISCLOSURE_RECEIPT_VERSION, DisclosureContext,
+        DisclosurePublicInputs, ExpectedAuthority, ExpectedContext, Field, U256,
     };
 
     const VK_HASH: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
@@ -1228,5 +1356,204 @@ mod tests {
                 "vk_hash mismatch for proving key {pk_file}"
             );
         }
+    }
+
+    fn valid_verified_receipt() -> Result<DisclosureReceipt> {
+        let mut receipt = valid_receipt();
+        receipt.public_inputs.ext_context_hash = derive_ext_context_hash(&receipt.context)?;
+        Ok(receipt)
+    }
+
+    fn matching_expected_context(receipt: &DisclosureReceipt) -> ExpectedContext {
+        ExpectedContext {
+            network: receipt.context.network.clone(),
+            pool_address: receipt.context.pool_address.clone(),
+            authority: Some(ExpectedAuthority::with_label(
+                receipt.context.authority_identity_payload_hex.clone(),
+                receipt.context.authority_label.clone(),
+            )),
+        }
+    }
+
+    #[test]
+    fn verify_expected_context_pool_mismatch_only() -> Result<()> {
+        let receipt = valid_verified_receipt()?;
+        let mut expected = matching_expected_context(&receipt);
+        expected.pool_address =
+            "CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".to_string();
+
+        let report = verify_receipt_report_with_expected_context(
+            &receipt,
+            VK_HASH,
+            Some(&expected),
+            |_, _| Ok(true),
+            verify_receipt_context(&receipt)?,
+            |_| Ok(true),
+        )?;
+
+        assert_eq!(
+            report.context_mismatches,
+            vec![ContextMismatchReason::PoolMismatch]
+        );
+        assert_eq!(report.authority_status, AuthorityStatus::Matched);
+        assert!(!report.is_cryptographically_valid());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_expected_context_network_mismatch_only() -> Result<()> {
+        let receipt = valid_verified_receipt()?;
+        let mut expected = matching_expected_context(&receipt);
+        expected.network = "public".to_string();
+
+        let report = verify_receipt_report_with_expected_context(
+            &receipt,
+            VK_HASH,
+            Some(&expected),
+            |_, _| Ok(true),
+            verify_receipt_context(&receipt)?,
+            |_| Ok(true),
+        )?;
+
+        assert_eq!(
+            report.context_mismatches,
+            vec![ContextMismatchReason::NetworkMismatch]
+        );
+        assert_eq!(report.authority_status, AuthorityStatus::Matched);
+        assert!(!report.is_cryptographically_valid());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_expected_context_authority_mismatch_only() -> Result<()> {
+        let receipt = valid_verified_receipt()?;
+        let mut expected = matching_expected_context(&receipt);
+        expected.authority = Some(ExpectedAuthority::new("0xdeadbeef"));
+
+        let report = verify_receipt_report_with_expected_context(
+            &receipt,
+            VK_HASH,
+            Some(&expected),
+            |_, _| Ok(true),
+            verify_receipt_context(&receipt)?,
+            |_| Ok(true),
+        )?;
+
+        assert_eq!(
+            report.context_mismatches,
+            vec![ContextMismatchReason::AuthorityMismatch]
+        );
+        assert_eq!(report.authority_status, AuthorityStatus::Mismatch);
+        assert!(!report.is_cryptographically_valid());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_expected_context_all_match() -> Result<()> {
+        let receipt = valid_verified_receipt()?;
+        let expected = matching_expected_context(&receipt);
+
+        let report = verify_receipt_report_with_expected_context(
+            &receipt,
+            VK_HASH,
+            Some(&expected),
+            |_, _| Ok(true),
+            verify_receipt_context(&receipt)?,
+            |_| Ok(true),
+        )?;
+
+        assert!(report.context_mismatches.is_empty());
+        assert_eq!(report.authority_status, AuthorityStatus::Matched);
+        assert!(report.proof_verified);
+        assert!(report.context_verified);
+        assert!(report.known_root_status);
+        assert!(report.is_cryptographically_valid());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_expected_context_multiple_mismatches() -> Result<()> {
+        let receipt = valid_verified_receipt()?;
+        let expected = ExpectedContext {
+            network: "other-network".to_string(),
+            pool_address: "CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".to_string(),
+            authority: Some(ExpectedAuthority::new("0xdeadbeef")),
+        };
+
+        let report = verify_receipt_report_with_expected_context(
+            &receipt,
+            VK_HASH,
+            Some(&expected),
+            |_, _| Ok(true),
+            verify_receipt_context(&receipt)?,
+            |_| Ok(true),
+        )?;
+
+        assert_eq!(
+            report.context_mismatches,
+            vec![
+                ContextMismatchReason::PoolMismatch,
+                ContextMismatchReason::NetworkMismatch,
+                ContextMismatchReason::AuthorityMismatch,
+            ]
+        );
+        assert_eq!(report.authority_status, AuthorityStatus::Mismatch);
+        assert!(!report.is_cryptographically_valid());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_expected_context_tampered_display_field_invalid() -> Result<()> {
+        let mut receipt = valid_verified_receipt()?;
+        let expected = matching_expected_context(&receipt);
+
+        // Tamper receipt display context after proof ext_context_hash was
+        // bound:
+        receipt.context.pool_address =
+            "CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB".to_string();
+
+        let context_verified = verify_receipt_context(&receipt)?;
+        assert!(
+            !context_verified,
+            "context hash check must fail when display field was tampered"
+        );
+
+        let report = verify_receipt_report_with_expected_context(
+            &receipt,
+            VK_HASH,
+            Some(&expected),
+            |_, _| Ok(true),
+            context_verified,
+            |_| Ok(true),
+        )?;
+
+        assert!(!report.context_verified);
+        assert!(!report.is_cryptographically_valid());
+        Ok(())
+    }
+
+    #[test]
+    fn verify_expected_context_no_authority_configured_reports_unchecked() -> Result<()> {
+        let receipt = valid_verified_receipt()?;
+        let mut expected = matching_expected_context(&receipt);
+        expected.authority = None;
+
+        let report = verify_receipt_report_with_expected_context(
+            &receipt,
+            VK_HASH,
+            Some(&expected),
+            |_, _| Ok(true),
+            verify_receipt_context(&receipt)?,
+            |_| Ok(true),
+        )?;
+
+        // Outcome must be explicitly Unchecked:
+        assert_eq!(report.authority_status, AuthorityStatus::Unchecked);
+        assert_ne!(report.authority_status, AuthorityStatus::Matched);
+        assert!(report.context_mismatches.is_empty());
+        // Per maintainer instructions, Unchecked does not invalidate verdict
+        // when pool and network match:
+        assert!(report.is_cryptographically_valid());
+        Ok(())
     }
 }

@@ -239,11 +239,80 @@ impl DisclosurePublicInputs {
     }
 }
 
+/// Expected verifier context to validate against a disclosure receipt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectedContext {
+    /// Expected network name from deployment configuration.
+    pub network: String,
+    /// Expected pool contract address.
+    pub pool_address: String,
+    /// Optional expected authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authority: Option<ExpectedAuthority>,
+}
+
+/// Expected authority specification.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectedAuthority {
+    /// Expected authority identity payload encoded as hex.
+    pub identity_payload_hex: String,
+    /// Optional expected human-readable authority label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+impl ExpectedAuthority {
+    /// Create an expected authority with only an identity payload hex.
+    pub fn new(identity_payload_hex: impl Into<String>) -> Self {
+        Self {
+            identity_payload_hex: identity_payload_hex.into(),
+            label: None,
+        }
+    }
+
+    /// Create an expected authority with identity payload hex and label.
+    pub fn with_label(identity_payload_hex: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            identity_payload_hex: identity_payload_hex.into(),
+            label: Some(label.into()),
+        }
+    }
+}
+
+/// Reasons why a disclosure receipt context does not match expected verifier
+/// context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ContextMismatchReason {
+    /// Pool contract address does not match the expected pool.
+    PoolMismatch,
+    /// Network identifier does not match the expected network.
+    NetworkMismatch,
+    /// Authority identity or label does not match the expected authority.
+    AuthorityMismatch,
+}
+
+/// Status of authority verification against expected context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum AuthorityStatus {
+    /// Authority matched the expected authority.
+    Matched,
+    /// Authority did not match the expected authority.
+    Mismatch,
+    /// No expected authority was configured; authority was not checked.
+    #[default]
+    Unchecked,
+}
+
 /// Verification status returned.
 ///
 /// # Security semantics
 /// A receipt's cryptographic and contextual validity is confirmed when
-/// `proof_verified && context_verified && known_root_status` are all `true`.
+/// `proof_verified && context_verified && known_root_status` are all `true`
+/// and `context_mismatches` is empty.
 /// The `nullifiers_unspent` flag is separate: a valid receipt may disclose
 /// previously spent notes (e.g., to prove a past payment). The fields are
 /// kept separate so callers can enforce their specific business logic (e.g.,
@@ -264,13 +333,23 @@ pub struct DisclosureVerificationReport {
     /// on-chain. Empty when `nullifiers_unspent` is `true` or the check could
     /// not complete.
     pub spent_nullifier_indices: Vec<u32>,
+    /// Mismatches between receipt context and expected verifier context.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_mismatches: Vec<ContextMismatchReason>,
+    /// Status of the authority check against expected context.
+    #[serde(default)]
+    pub authority_status: AuthorityStatus,
 }
 
 impl DisclosureVerificationReport {
     /// Returns `true` when the proof, context, and root freshness checks all
-    /// pass. This confirms the mathematical validity of the disclosure.
+    /// pass, and there are no context mismatches.
     pub fn is_cryptographically_valid(&self) -> bool {
-        self.proof_verified && self.context_verified && self.known_root_status
+        self.proof_verified
+            && self.context_verified
+            && self.known_root_status
+            && self.context_mismatches.is_empty()
+            && self.authority_status != AuthorityStatus::Mismatch
     }
 
     /// Returns `true` only when the disclosure is cryptographically valid
