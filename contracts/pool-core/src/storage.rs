@@ -5,6 +5,8 @@
 //! helper here is generic over the caller's key type and maps failures onto
 //! the caller's error domain through [`PoolError`].
 
+use core::fmt::Debug;
+
 use soroban_sdk::{Env, IntoVal, TryFromVal, Val};
 
 use crate::error::PoolError;
@@ -16,8 +18,9 @@ use crate::error::PoolError;
 /// Returns [`PoolError::not_initialized`] if the key is absent.
 pub fn instance_get<K, V, E>(env: &Env, key: &K) -> Result<V, E>
 where
-    K: IntoVal<Env, Val> + TryFromVal<Env, Val> + Clone,
+    K: IntoVal<Env, Val>,
     V: TryFromVal<Env, Val>,
+    V::Error: Debug,
     E: PoolError,
 {
     env.storage()
@@ -33,8 +36,9 @@ where
 /// Returns [`PoolError::not_initialized`] if the key is absent.
 pub fn persistent_get<K, V, E>(env: &Env, key: &K) -> Result<V, E>
 where
-    K: IntoVal<Env, Val> + TryFromVal<Env, Val> + Clone,
+    K: IntoVal<Env, Val>,
     V: TryFromVal<Env, Val>,
+    V::Error: Debug,
     E: PoolError,
 {
     env.storage()
@@ -46,7 +50,7 @@ where
 /// Whether a key is present in the contract's persistent storage.
 pub fn persistent_has<K>(env: &Env, key: &K) -> bool
 where
-    K: IntoVal<Env, Val> + TryFromVal<Env, Val> + Clone,
+    K: IntoVal<Env, Val>,
 {
     env.storage().persistent().has(key)
 }
@@ -55,7 +59,7 @@ where
 /// the unit value is unused. This is how a nullifier is marked spent.
 pub fn persistent_set_unit<K>(env: &Env, key: &K)
 where
-    K: IntoVal<Env, Val> + TryFromVal<Env, Val> + Clone,
+    K: IntoVal<Env, Val>,
 {
     env.storage().persistent().set(key, &());
 }

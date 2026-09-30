@@ -1,9 +1,11 @@
 //! Pure numeric helpers shared by `pool` and `pool-gvk`.
 //!
-//! These take no `DataKey`/error type, so each contract calls them directly
-//! and maps the result to its own `Error` enum.
+//! The base functions take no `DataKey`/error type, so each contract calls
+//! them directly and maps the result to its own `Error` enum; the
+//! `require_*` variants do that mapping through the [`PoolError`] trait.
 
-use soroban_sdk::{BytesN, Env, I256, U256};
+use crate::{error::PoolError, policy};
+use soroban_sdk::{BytesN, Env, I256, U256, Vec};
 use soroban_utils::constants::bn256_modulus;
 
 /// Convert a U256 into a 32-byte big-endian field element.

@@ -332,8 +332,7 @@ impl PoolGvkContract {
     ///
     /// Presence of the per-nullifier storage key is the spent flag.
     pub fn is_spent(env: &Env, n: &U256) -> Result<bool, Error> {
-        let key = DataKey::Nullifier(n.clone());
-        Ok(env.storage().persistent().has(&key))
+        Ok(storage::persistent_has(env, &DataKey::Nullifier(n.clone())))
     }
 
     /// Update the contract administrator. Requires authorization from the
@@ -657,11 +656,6 @@ impl PoolGvkContract {
         // attempts the transfer.
         let zero = I256::from_i32(env, 0);
         if ext_data.ext_amount > zero {
-            let deposit_u = U256::from_be_bytes(env, &ext_data.ext_amount.to_be_bytes());
-            let max = Self::get_maximum_deposit(env)?;
-            if deposit_u > max {
-                return Err(Error::WrongExtAmount);
-            }
             let this = env.current_contract_address();
             let amount = amounts::require_i128_nonneg(env, &ext_data.ext_amount)?;
             let token = Self::get_token(env)?;
@@ -677,6 +671,17 @@ impl PoolGvkContract {
     /// `transact` can run every check (including the ZK proof) before its
     /// deposit transfer — checks first, effects after.
     fn verify_transact(env: &Env, proof: &Proof, ext_data: &ExtData) -> Result<(), Error> {
+        // 0. Deposit bound check. Pure check, run ahead of everything else
+        // so the error precedence matches the pre-split behavior (the bound
+        // was the first thing checked after authorization).
+        let zero = I256::from_i32(env, 0);
+        if ext_data.ext_amount > zero {
+            let deposit_u = U256::from_be_bytes(env, &ext_data.ext_amount.to_be_bytes());
+            let max = Self::get_maximum_deposit(env)?;
+            if deposit_u > max {
+                return Err(Error::WrongExtAmount);
+            }
+        }
         // 1. Merkle root check
         if !MerkleTreeWithHistory::is_known_root(env, &proof.root)? {
             return Err(Error::UnknownRoot);
