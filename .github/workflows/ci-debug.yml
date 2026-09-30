@@ -49,6 +49,9 @@ jobs:
               f, ln = m.group(1), m.group(2)
               body = h[:700].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
               print(f"::error file={f},line={ln},title=root fmt mismatch::{body}")
+          if n == 0:
+              head = txt[:900].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f"::notice::root fmt produced no 'Diff in' hunks; raw output head::{head}")
           exit_line = [l for l in txt.splitlines() if l.startswith('exit=')]
           print(f"::notice::root fmt {exit_line[-1] if exit_line else 'no-output'}; hunks emitted: {min(n, 9)}")
           PY
@@ -79,6 +82,9 @@ jobs:
               f, ln = m.group(1), m.group(2)
               body = h[:700].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
               print(f"::error file={f},line={ln},title=integration-tests fmt mismatch::{body}")
+          if n == 0:
+              head = txt[:900].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+              print(f"::notice::integration-tests fmt produced no 'Diff in' hunks; raw output head::{head}")
           exit_line = [l for l in txt.splitlines() if l.startswith('exit=')]
           print(f"::notice::integration-tests fmt {exit_line[-1] if exit_line else 'no-output'}; hunks emitted: {min(n, 9)}")
           PY
@@ -104,12 +110,17 @@ jobs:
               m = re.match(r'^(error(?:\[[^\]]+\])?: .*)$', lines[i])
               if m:
                   loc = ""
-                  for j in range(i, min(i + 15, len(lines))):
-                      lm = re.match(r'\s*--> (.*):(\d+):(\d+)', lines[j])
-                      if lm:
-                          loc = f"file={lm.group(1)},line={lm.group(2)},col={lm.group(3)}"
+                  detail = []
+                  for j in range(i + 1, min(i + 15, len(lines))):
+                      if re.match(r'^(error|warning)\b', lines[j]):
                           break
-                  msg = m.group(1)[:450].replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
+                      lm = re.match(r'\s*--> (.*):(\d+):(\d+)', lines[j])
+                      if lm and not loc:
+                          loc = f"file={lm.group(1)},line={lm.group(2)},col={lm.group(3)}"
+                      if lines[j].strip() and not lines[j].startswith('note: run with'):
+                          detail.append(lines[j].strip())
+                  msg = (m.group(1)[:300] + ' | ' + ' // '.join(detail[1:5]))[:600]
+                  msg = msg.replace('%', '%25').replace('\r', '%0D').replace('\n', '%0A')
                   print(f"::error {loc}::{msg}")
                   emitted += 1
                   if emitted >= 9:

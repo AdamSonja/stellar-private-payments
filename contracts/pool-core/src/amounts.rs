@@ -130,7 +130,7 @@ pub fn require_canonical_transact_inputs<E: PoolError>(
     require_canonical_bn256_input(root, modulus)?;
     require_canonical_bn256_input(public_amount, modulus)?;
     for nullifier in input_nullifiers.iter() {
-        require_canonical_bn256_input(nullifier, modulus)?;
+        require_canonical_bn256_input(&nullifier, modulus)?;
     }
     require_canonical_bn256_input(output_commitment0, modulus)?;
     require_canonical_bn256_input(output_commitment1, modulus)?;
