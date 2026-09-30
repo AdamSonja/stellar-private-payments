@@ -1957,7 +1957,8 @@ fn transact_rejects_deposit_over_maximum() {
     let (asp_membership_root, asp_non_membership_root) = asp_roots(&setup);
 
     // Mock proof, `transact` rejects the deposit during verification (before
-    // `settle_transact` is reached), so the proof itself never needs to be valid.
+    // `settle_transact` is reached), so the proof itself never needs to be
+    // valid.
     let proof = Proof {
         proof: mk_mock_groth16_proof(&env),
         root: pool.get_root(),
@@ -2154,7 +2155,7 @@ fn transact_rejects_deposit_with_invalid_proof_without_moving_funds() {
     assert_eq!(token.balance(&pool_id), 0);
 
     use soroban_sdk::testutils::Events;
-    let events_before = env.events().all().len();
+    let events_before = env.events().all().events().len();
 
     let err = pool
         .try_transact(&proof, &deposit, &sender)
@@ -2182,7 +2183,7 @@ fn transact_rejects_deposit_with_invalid_proof_without_moving_funds() {
     // must not reach the token contract at all: no event of any kind may be
     // recorded from it (the token transfer would publish one).
     assert_eq!(
-        env.events().all().len(),
+        env.events().all().events().len(),
         events_before,
         "a refused deposit must not emit any token transfer event"
     );
