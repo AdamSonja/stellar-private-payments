@@ -418,7 +418,8 @@ impl PoolContract {
     ///
     /// 1. Perform all transaction validation and proof verification
     /// 2. Only if validation succeeds, perform deposit token transfer
-    /// 3. Complete the state-changing transaction (nullifiers, withdrawal, tree)
+    /// 3. Complete the state-changing transaction (nullifiers, withdrawal,
+    ///    tree)
     fn internal_transact(
         env: &Env,
         proof: Proof,

@@ -2132,7 +2132,8 @@ fn transact_deposit_verification_runs_before_transfer_when_sender_unfunded() {
     assert_eq!(token.balance(&pool_id), 0);
 
     // If transfer happened before verification, this would fail with a token
-    // balance error. Because verification happens first, it fails with InvalidProof.
+    // balance error. Because verification happens first, it fails with
+    // InvalidProof.
     let err = pool
         .try_transact(&proof, &deposit, &sender)
         .expect_err("a deposit with invalid proof must be refused");
