@@ -66,7 +66,8 @@ pub fn validate_root(env: &Env, root: &U256) -> Result<(), Error> {
     Ok(())
 }
 
-/// Check that none of the transaction's input nullifiers have already been spent.
+/// Check that none of the transaction's input nullifiers have already been
+/// spent.
 pub fn validate_nullifiers<E, F>(nullifiers: &Vec<U256>, mut is_spent: F) -> Result<(), E>
 where
     F: FnMut(&U256) -> Result<bool, E>,
