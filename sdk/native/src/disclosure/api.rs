@@ -167,15 +167,19 @@ fn validate_receipt_context(
         )));
     }
 
-    if let Some(expected_authority) = expected_authority
-        && receipt.context.authority_identity_payload_hex.trim() != expected_authority.trim()
-    {
-        return Err(Error::DisclosureVerification(format!(
-            "authority mismatch: expected {}, got {}",
-            expected_authority.trim(),
-            receipt.context.authority_identity_payload_hex.trim(),
-        )));
-    }
+if let Some(expected_authority) = expected_authority
+    && !receipt
+        .context
+        .authority_identity_payload_hex
+        .trim()
+        .eq_ignore_ascii_case(expected_authority.trim())
+{
+    return Err(Error::DisclosureVerification(format!(
+        "authority mismatch: expected {}, got {}",
+        expected_authority.trim(),
+        receipt.context.authority_identity_payload_hex.trim(),
+    )));
+}
 
     Ok(())
 }
