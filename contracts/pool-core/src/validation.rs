@@ -147,6 +147,7 @@ pub fn validate_bn256_public_input(value: &U256, modulus: &U256) -> Result<(), E
 
 /// Validate canonical range for all standard public input fields shared by
 /// privacy pools.
+#[allow(clippy::too_many_arguments)]
 pub fn validate_base_bn256_public_inputs(
     root: &U256,
     public_amount: &U256,
