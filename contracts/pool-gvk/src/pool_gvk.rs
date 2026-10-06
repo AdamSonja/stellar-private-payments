@@ -21,7 +21,7 @@ use pool_core::{
     policy, validation,
 };
 use soroban_sdk::{
-    Address, Bytes, BytesN, Env, I256, U256, Vec, contract, contracterror, contractevent,
+    Address, Bytes, BytesN, Env, I256, String, U256, Vec, contract, contracterror, contractevent,
     contractimpl, contracttype, crypto::bn254::Bn254Fr, token::TokenClient,
 };
 use soroban_utils::constants::bn256_modulus;
@@ -107,8 +107,8 @@ impl From<validation::Error> for Error {
 /// The configuration the constructor writes, [`DataKey::Token`],
 /// [`DataKey::Verifier`], [`DataKey::MaximumDepositAmount`],
 /// [`DataKey::ASPMembership`], [`DataKey::ASPNonMembership`],
-/// [`DataKey::PolicyFlags`], [`DataKey::AdminViewKey`], and
-/// [`DataKey::GvkMode`], lives in the contract's instance entry.
+/// [`DataKey::PolicyFlags`], [`DataKey::KdfDomain`], [`DataKey::AdminViewKey`],
+/// and [`DataKey::GvkMode`], lives in the contract's instance entry.
 /// [`DataKey::Admin`] and [`DataKey::Nullifier`] are persistent keys.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -129,6 +129,8 @@ pub(crate) enum DataKey {
     ASPNonMembership,
     /// Pool ASP policy flags (bitset; see `crate::policy`).
     PolicyFlags,
+    /// Privacy key derivation domain. Immutable.
+    KdfDomain,
     /// Admin's Global View Key public point `D`, set once at construction.
     ///
     /// Immutable by design (issue #220): there is no setter, and
@@ -235,6 +237,7 @@ impl PoolGvkContract {
         maximum_deposit_amount: U256,
         levels: u32,
         policy_flags: u32,
+        kdf_domain: String,
         admin_view_key: BabyJubJubPoint,
         gvk_mode: u32,
     ) -> Result<(), Error> {
@@ -253,6 +256,7 @@ impl PoolGvkContract {
         instance.set(&DataKey::ASPNonMembership, &asp_non_membership);
         instance.set(&DataKey::MaximumDepositAmount, &maximum_deposit_amount);
         instance.set(&DataKey::PolicyFlags, &policy_flags);
+        instance.set(&DataKey::KdfDomain, &kdf_domain);
         instance.set(&DataKey::AdminViewKey, &admin_view_key);
         instance.set(&DataKey::GvkMode, &gvk_mode);
 
@@ -304,6 +308,14 @@ impl PoolGvkContract {
         env.storage()
             .instance()
             .get(&DataKey::GvkMode)
+            .ok_or(Error::NotInitialized)
+    }
+
+    /// Get the deployment's privacy key derivation domain.
+    pub fn get_kdf_domain(env: &Env) -> Result<String, Error> {
+        env.storage()
+            .instance()
+            .get(&DataKey::KdfDomain)
             .ok_or(Error::NotInitialized)
     }
 

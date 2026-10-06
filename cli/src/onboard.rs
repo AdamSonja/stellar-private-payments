@@ -16,7 +16,7 @@ use stellar_private_payments::{
     state::{DEFAULT_BOOTNODE_URL, SqliteStorage},
     types::KeyDerivationSignature,
     zk::encryption::{
-        KEY_DERIVATION_MESSAGE, derive_encryption_and_note_keypairs, derive_membership_blinding,
+        derive_encryption_and_note_keypairs, derive_membership_blinding, key_derivation_message,
         verify_owner_signature,
     },
 };
@@ -55,14 +55,17 @@ pub struct OnboardArgs {
 /// derived. Bails with a pointer to `spp onboard` when not ready.
 pub fn ensure_ready(config: &CliConfig, account: &Account) -> Result<()> {
     stellar_cli::ensure_installed()?;
-    let mut storage = config.open_storage()?;
+    let storage = config.open_storage()?;
     if !storage.get_disclaimer_state(&account.address)?.accepted {
         bail!(
             "You must accept the disclaimer first. Run: spp onboard --account {}",
             account.alias
         );
     }
-    if storage.get_private_keys(&account.address)?.is_none() {
+    if storage
+        .get_private_keys(&account.address, &config.deployment.kdf_domain)?
+        .is_none()
+    {
         bail!(
             "Privacy keys are not set up. Run: spp onboard --account {}",
             account.alias
@@ -104,7 +107,10 @@ pub fn run(config: &CliConfig, args: &OnboardArgs, json: bool) -> Result<()> {
     }
 
     // 4. Derive privacy keys.
-    if storage.get_private_keys(&account.address)?.is_some() {
+    if storage
+        .get_private_keys(&account.address, &config.deployment.kdf_domain)?
+        .is_some()
+    {
         say(interactive, "Privacy keys already present.");
     } else {
         if interactive {
@@ -137,16 +143,19 @@ fn derive_and_save_keys(
     account: &Account,
     storage: &mut SqliteStorage,
 ) -> Result<()> {
+    let message = key_derivation_message(&config.deployment.kdf_domain);
     let signature = stellar_cli::sign_message(
         &account.alias,
-        KEY_DERIVATION_MESSAGE,
+        &message,
         config.stellar_config_dir.as_deref(),
     )
     .context("derive privacy-key signature via stellar CLI")?;
     save_owner_keys(
         storage,
         &account.address,
+        &config.deployment.kdf_domain,
         &config.deployment.network,
+        &message,
         signature,
     )
 }
@@ -157,10 +166,12 @@ fn derive_and_save_keys(
 fn save_owner_keys(
     storage: &mut SqliteStorage,
     owner_address: &str,
+    kdf_domain: &str,
     network: &str,
+    message: &str,
     signature: KeyDerivationSignature,
 ) -> Result<()> {
-    verify_owner_signature(owner_address, KEY_DERIVATION_MESSAGE, &signature)
+    verify_owner_signature(owner_address, message, &signature)
         .context("check the privacy-key signature against the account")?;
 
     let (note_keypair, encryption_keypair) = derive_encryption_and_note_keypairs(signature.clone())
@@ -170,6 +181,7 @@ fn save_owner_keys(
     storage
         .save_encryption_and_note_keypairs(
             owner_address,
+            kdf_domain,
             &note_keypair,
             &encryption_keypair,
             &membership_blinding,
@@ -289,16 +301,18 @@ mod tests {
         chain::LocalSigner,
         state::SqliteStorage,
         types::KeyDerivationSignature,
-        zk::encryption::{KEY_DERIVATION_MESSAGE, sep53_payload},
+        zk::encryption::{key_derivation_message, sep53_payload},
     };
 
     use super::save_owner_keys;
+
+    const KDF_DOMAIN: &str = "tests";
 
     /// What `stellar message sign` returns for `signer`.
     fn derivation_signature(signer: &LocalSigner) -> KeyDerivationSignature {
         KeyDerivationSignature(
             signer
-                .sign(&sep53_payload(KEY_DERIVATION_MESSAGE))
+                .sign(&sep53_payload(&key_derivation_message(KDF_DOMAIN)))
                 .as_bytes()
                 .to_vec(),
         )
@@ -312,14 +326,16 @@ mod tests {
         save_owner_keys(
             &mut storage,
             owner.public_key(),
+            KDF_DOMAIN,
             "testnet",
+            &key_derivation_message(KDF_DOMAIN),
             derivation_signature(&owner),
         )
         .expect("the owner's own signature must store keys");
 
         assert!(
             storage
-                .get_private_keys(owner.public_key())
+                .get_private_keys(owner.public_key(), KDF_DOMAIN)
                 .expect("read keys")
                 .is_some()
         );
@@ -334,7 +350,9 @@ mod tests {
         let error = save_owner_keys(
             &mut storage,
             owner.public_key(),
+            KDF_DOMAIN,
             "testnet",
+            &key_derivation_message(KDF_DOMAIN),
             derivation_signature(&other),
         )
         .expect_err("another account's signature must be refused");
@@ -345,7 +363,7 @@ mod tests {
         );
         assert!(
             storage
-                .get_private_keys(owner.public_key())
+                .get_private_keys(owner.public_key(), KDF_DOMAIN)
                 .expect("read keys")
                 .is_none()
         );
