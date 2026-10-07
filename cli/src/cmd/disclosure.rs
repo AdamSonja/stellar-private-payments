@@ -97,11 +97,8 @@ pub fn verify(
         &prover,
         &receipt,
         expected_vk_hash,
-<<<<<<< HEAD
-=======
         Some(expected_pool),
         expected_authority,
->>>>>>> 3db4242 (fix: add expected pool to disclosure verification)
     )
     .map_err(|e| anyhow::anyhow!("verify disclosure receipt: {e}"))?;
     print_verification(&report, json)?;
