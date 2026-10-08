@@ -164,6 +164,16 @@ impl ContractConfig {
         contract_config_from_js(value)
     }
 
+    #[wasm_bindgen(getter, js_name = networkPassphrase)]
+    pub fn network_passphrase(&self) -> Option<String> {
+        self.inner.network_passphrase.clone()
+    }
+
+    #[wasm_bindgen(getter, js_name = rpcUrl)]
+    pub fn rpc_url(&self) -> Option<String> {
+        self.inner.rpc_url.clone()
+    }
+
     #[wasm_bindgen(getter)]
     pub fn network(&self) -> String {
         self.inner.network.clone()

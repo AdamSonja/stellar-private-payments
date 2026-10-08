@@ -40,5 +40,7 @@
         "y": "0x01e0794e7aeef82ba1d53c14f342cea9e8777470b76f48ef6be7e98dd32ab344"
       }
     }
-  ]
+  ],
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "rpcUrl": "https://soroban-testnet.stellar.org"
 }

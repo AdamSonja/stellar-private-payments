@@ -1,7 +1,10 @@
 # Deploying pools
 
 `deployments/scripts/deploy.sh` provides support for deploying pools.
-Requires building contracts. See [CONTRIBUTING.md](CONTRIBUTING.md) for build prerequisites.
+It builds the contracts before submitting deployment transactions. See
+[CONTRIBUTING.md](CONTRIBUTING.md) for build prerequisites.
+
+## Usage
 
 ```sh
 deployments/scripts/deploy.sh <network> [OPTIONS]

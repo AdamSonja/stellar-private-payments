@@ -391,7 +391,19 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+need stellar
+need jq
+
 [[ -n "$NETWORK" ]] || usage
+[[ "$NETWORK" =~ ^[a-zA-Z0-9_-]+$ ]] || die "invalid network folder name"
+NETWORK_METADATA="$(stellar network ls --long | jq -Rs --arg name "$NETWORK" '
+  split("\n\n") | map(split("\n") | map(
+    capture("^\\s*(?<key>Name|RPC url|Network passphrase):\\s*(?<value>.*)$")? ) |
+    map({key: .key, value: .value}) | from_entries) |
+  map(select(.Name == $name)) | first |
+  if .["RPC url"] == null or .["Network passphrase"] == null then error("network metadata missing")
+  else {rpcUrl: .["RPC url"], networkPassphrase: .["Network passphrase"]} end')" || die "failed to resolve network metadata"
+
 need stellar
 need jq
 
@@ -840,6 +852,6 @@ DEPLOY_JSON="{\"network\":\"$NETWORK\",\"kdf_domain\":$(jq -Rn --arg d "$KDF_DOM
 
 DEPLOYMENTS_DIR="$ROOT_DIR/deployments/$NETWORK"
 mkdir -p "$DEPLOYMENTS_DIR"
-DEPLOY_JSON_PRETTY="$(printf '%s\n' "$DEPLOY_JSON" | jq .)"
+DEPLOY_JSON_PRETTY="$(printf '%s\n' "$DEPLOY_JSON" | jq --argjson metadata "$NETWORK_METADATA" '. + $metadata')"
 printf '%s\n' "$DEPLOY_JSON_PRETTY" > "$DEPLOYMENTS_DIR/deployments.json"
 printf '%s\n' "$DEPLOY_JSON_PRETTY"

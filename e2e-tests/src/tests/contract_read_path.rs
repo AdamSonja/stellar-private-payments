@@ -146,6 +146,8 @@ fn config_for(deployment: &Deployment, uri: &str) -> (ContractConfig, PoolConfig
         gvk_authority_pub_key: None,
     };
     let config = ContractConfig {
+        network_passphrase: None,
+        rpc_url: None,
         network: uri.to_string(),
         kdf_domain: "tests".to_string(),
         deployer: strkey(&deployment.admin),

@@ -122,6 +122,9 @@ mod split_tests {
             // Contents are irrelevant here: validate() checks both addresses
             // before it looks the pool up, so these tests never reach it.
             contract_config: ContractConfig {
+                network_passphrase: None,
+                rpc_url: None,
+
                 network: String::new(),
                 kdf_domain: String::new(),
                 deployer: String::new(),
