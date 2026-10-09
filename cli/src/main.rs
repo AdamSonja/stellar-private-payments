@@ -225,7 +225,7 @@ enum DisclosureCommands {
         /// Expected pool contract address (C…)
         #[arg(long)]
         pool: String,
-        /// Expected authority identity payload or label
+        /// Expected authority identity payload as 0x-prefixed hex
         #[arg(long)]
         authority: Option<String>,
         /// Override the canonical verifying-key hash pinned by the CLI
