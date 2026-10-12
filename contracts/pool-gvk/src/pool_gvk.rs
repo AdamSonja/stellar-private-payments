@@ -685,9 +685,7 @@ impl PoolGvkContract {
 
     /// Execute a shielded transaction with deposit handling.
     ///
-    /// If `ext_amount > 0`, tokens are transferred from the sender to the
-    /// pool before processing the transaction. Renews the pool, its tree, and
-    /// its verifier by at most a day each.
+    /// Renews the pool, its tree, and its verifier by at most a day each.
     pub fn transact(
         env: &Env,
         proof: Proof,
@@ -696,39 +694,41 @@ impl PoolGvkContract {
     ) -> Result<(), Error> {
         sender.require_auth();
         soroban_utils::extend_instance(env);
-        let token = Self::get_token(env)?;
-        let token_client = TokenClient::new(env, &token);
+
+        Self::internal_transact(env, proof, ext_data, &sender)
+    }
+
+    /// Process a private transaction: validates the proof and all public
+    /// inputs, marks nullifiers as spent, inserts new commitments into the
+    /// Merkle tree, processes token transfers, and emits transaction events.
+    fn internal_transact(
+        env: &Env,
+        proof: Proof,
+        ext_data: ExtData,
+        sender: &Address,
+    ) -> Result<(), Error> {
         let zero = I256::from_i32(env, 0);
 
+        // 1. Deposit amount check
         if ext_data.ext_amount > zero {
             let deposit_u = U256::from_be_bytes(env, &ext_data.ext_amount.to_be_bytes());
             let max = Self::get_maximum_deposit(env)?;
             if deposit_u > max {
                 return Err(Error::WrongExtAmount);
             }
-            let this = env.current_contract_address();
-            let amount = Self::i256_to_i128_nonneg(env, &ext_data.ext_amount)?;
-            token_client.transfer(&sender, &this, &amount);
         }
 
-        Self::internal_transact(env, proof, ext_data)
-    }
-
-    /// Process a private transaction: validates the proof and all public
-    /// inputs, marks nullifiers as spent, processes withdrawals, and inserts
-    /// new commitments into the Merkle tree.
-    fn internal_transact(env: &Env, proof: Proof, ext_data: ExtData) -> Result<(), Error> {
-        // 1. Merkle root check
+        // 2. Merkle root check
         if !MerkleTreeWithHistory::is_known_root(env, &proof.root)? {
             return Err(Error::UnknownRoot);
         }
-        // 2. Nullifier checks (prevent double-spending)
+        // 3. Nullifier checks (prevent double-spending)
         for n in proof.input_nullifiers.iter() {
             if Self::is_spent(env, &n)? {
                 return Err(Error::AlreadySpentNullifier);
             }
         }
-        // 3. External data hash check. This is also the value the circuit's
+        // 4. External data hash check. This is also the value the circuit's
         // `nonce` public input is required to equal (see `verify_proof`),
         // which *binds* the nonce to this transaction's parameters. It does
         // not make the nonce unique: `hash_ext_data` is a deterministic
@@ -747,14 +747,14 @@ impl PoolGvkContract {
             return Err(Error::WrongExtHash);
         }
 
-        // 4. Public amount check
+        // 5. Public amount check
         let expected_public_amount =
             Self::calculate_public_amount(env, ext_data.ext_amount.clone())?;
         if proof.public_amount != expected_public_amount {
             return Err(Error::WrongExtAmount);
         }
 
-        // ASP root validation
+        // 6. ASP root validation
         let policy_flags = Self::load_policy_flags(env)?;
         if policy::requires_non_membership_proofs(policy_flags) {
             let non_member_root = Self::get_asp_non_membership_root(env)?;
@@ -770,24 +770,48 @@ impl PoolGvkContract {
             }
         }
 
-        // 5. ZK proof verification (includes the GVK ciphertext-count and
+        // 7. ZK proof verification (includes the GVK ciphertext-count and
         // canonical-range checks)
         if !Self::verify_proof(env, &proof)? {
             return Err(Error::InvalidProof);
         }
 
-        // 6. Mark nullifiers as spent. `input_gvk_ciphertexts` is either empty
-        // (view-only) or exactly as long as `input_nullifiers` (traceable) —
-        // already enforced by `verify_proof`'s ciphertext-count check above —
-        // so a non-empty vec means every nullifier has a matching ciphertext
-        // at the same index.
+        // 8. Mark nullifiers as spent
+        for n in proof.input_nullifiers.iter() {
+            let _ = Self::mark_spent(env, &n);
+        }
+
+        // 9. Insert new commitments into Merkle tree
+        let (idx_0, idx_1) = MerkleTreeWithHistory::insert_two_leaves(
+            env,
+            proof.output_commitment0.clone(),
+            proof.output_commitment1.clone(),
+        )?;
+
+        // 10. Process token transfers
+        let token_client = TokenClient::new(env, &token);
+        let this = env.current_contract_address();
+
+        if ext_data.ext_amount > zero {
+            let amount = Self::i256_to_i128_nonneg(env, &ext_data.ext_amount)?;
+            token_client.transfer(sender, &this, &amount);
+        } else if ext_data.ext_amount < zero {
+            let abs = zero.sub(&ext_data.ext_amount);
+            let amount: i128 = Self::i256_to_i128_nonneg(env, &abs)?;
+            token_client.transfer(&this, &ext_data.recipient, &amount);
+        }
+
+        // 11. Emit events.
+        // `input_gvk_ciphertexts` is either empty (view-only) or exactly as long
+        // as `input_nullifiers` (traceable) — already enforced by `verify_proof`'s
+        // ciphertext-count check above — so a non-empty vec means every nullifier
+        // has a matching ciphertext at the same index.
         let has_input_ciphertexts = !proof.input_gvk_ciphertexts.is_empty();
         for i in 0..proof.input_nullifiers.len() {
             let n = proof
                 .input_nullifiers
                 .get(i)
                 .expect("index within input_nullifiers bounds");
-            let _ = Self::mark_spent(env, &n);
             let gvk_ciphertext = if has_input_ciphertexts {
                 Some(proof.input_gvk_ciphertexts.get(i).expect(
                     "input_gvk_ciphertexts length already validated equal to input_nullifiers",
@@ -802,26 +826,7 @@ impl PoolGvkContract {
             .publish(env);
         }
 
-        // 7. Process withdrawal if ext_amount < 0
-        let token = Self::get_token(env)?;
-        let token_client = TokenClient::new(env, &token);
-        let this = env.current_contract_address();
-        let zero = I256::from_i32(env, 0);
-
-        if ext_data.ext_amount < zero {
-            let abs = zero.sub(&ext_data.ext_amount);
-            let amount: i128 = Self::i256_to_i128_nonneg(env, &abs)?;
-            token_client.transfer(&this, &ext_data.recipient, &amount);
-        }
-
-        // 8. Insert new commitments into Merkle tree
-        let (idx_0, idx_1) = MerkleTreeWithHistory::insert_two_leaves(
-            env,
-            proof.output_commitment0.clone(),
-            proof.output_commitment1.clone(),
-        )?;
-
-        // 9. Emit commitment events, each carrying its GVK ciphertext
+        // Emit commitment events, each carrying its GVK ciphertext
         // (always present: both view-only and traceable modes encrypt every
         // output note).
         NewCommitmentEvent {
