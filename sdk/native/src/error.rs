@@ -66,6 +66,10 @@ pub enum Error {
     #[error("event history is unavailable: {0}")]
     RetentionGap(#[from] RetentionGap),
 
+    /// A deposit into a paused pool, refused before proving.
+    #[error("deposits into pool {pool} are paused")]
+    DepositsPaused { pool: String },
+
     /// An untyped failure.
     ///
     /// The message holds the whole `anyhow` cause chain, so the variant has no
@@ -81,6 +85,10 @@ pub enum RetentionGap {
 
     #[error("configured bootnode failed to fill retention gap: {0}")]
     BootnodeFailed(String),
+
+    /// The bootnode answered `-32004`; retry later.
+    #[error("configured bootnode cannot serve the event history yet: {0}")]
+    BootnodeNotReady(String),
 }
 
 /// Multi-tx plan stopped after one or more steps had already confirmed

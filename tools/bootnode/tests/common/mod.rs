@@ -56,6 +56,8 @@ pub fn fixture_deployment(start_ledger: u32) -> DeploymentSpec {
         network_passphrase: "fixture".into(),
         contract_ids: contract_ids(),
         min_deployment_ledger: start_ledger,
+        deployment_id: deployment_storage_id(&contract_ids(), start_ledger, "fixture"),
+        added_allowlists: Vec::new(),
     }
 }
 
