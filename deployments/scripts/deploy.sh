@@ -5,6 +5,7 @@
 set -euo pipefail
 
 die() { echo "deploy.sh: $*" >&2; exit 1; }
+warn() { echo "deploy.sh: warning: $*" >&2; }
 need() { command -v "$1" >/dev/null 2>&1 || die "missing '$1'"; }
 step() { echo "==> $*" >&2; }
 
@@ -25,6 +26,10 @@ Deploys and runs constructors for the ASP membership, ASP non-membership,
 one Circom Groth16 verifier per (policy, GVK mode) combination used, and one
 or more Pool / pool-gvk contracts.
 
+After writing the manifest, runs verify-deployment.sh against it (skipped with
+--skip-init) and exits with its status. On mainnet a failed custody check fails
+the deploy.
+
 Arguments:
   network               Network name from Stellar CLI config (e.g. testnet, futurenet)
 
@@ -40,8 +45,8 @@ Options:
                         native:<TOKEN_CONTRACT_ID>
                         classic:<CODE>:<ISSUER>:<TOKEN_CONTRACT_ID>
                         <TOKEN_CONTRACT_ID> must be the asset's own Stellar asset contract.
-                        A classic issuer needs AUTH_IMMUTABLE and neither
-                        AUTH_REVOCABLE nor AUTH_CLAWBACK_ENABLED.
+                        The script warns about each power a classic issuer's
+                        flags give it over the pool's balance.
   --gvk-authority-pubkey JSON
                         Admin Baby JubJub public key {"x":"0x..","y":"0x.."} for
                         every pool with gvk-viewonly or gvk-traceable
@@ -331,8 +336,8 @@ require_asset_contract() {
     || die "invalid pool spec '$spec': $token is not the Stellar asset contract of $asset ($expected)"
 }
 
-# Prints the token contract id, then the manifest's asset JSON. Refuses any token whose issuer or
-# code could freeze the pool's balance or take it.
+# Prints the token contract id, then the manifest's asset JSON. Refuses a contract token, whose own
+# code could freeze or take the pool's balance, and warns about each power a classic issuer holds.
 parse_pool_spec() {
   local spec="$1"
   local kind token code issuer rest flags
@@ -362,12 +367,14 @@ parse_pool_spec() {
       require_asset_contract "$spec" "$code:$issuer" "$token"
       flags="$(stellar ledger entry fetch account --account "$issuer" --network "$NETWORK" --output json 2>/dev/null \
         | jq '.entries[0].val.account.flags' || true)"
-      [[ "$flags" =~ ^[0-9]+$ ]] || die "invalid pool spec '$spec': could not read the account flags of issuer $issuer"
-      # AUTH_REVOCABLE (2) lets the issuer freeze a balance and AUTH_CLAWBACK_ENABLED (8) lets it
-      # take one. AUTH_IMMUTABLE (4) stops it from ever setting either.
-      (( flags & 2 )) && die "invalid pool spec '$spec': issuer $issuer has AUTH_REVOCABLE set and could freeze the pool's balance"
-      (( flags & 8 )) && die "invalid pool spec '$spec': issuer $issuer has AUTH_CLAWBACK_ENABLED set and could claw back the pool's balance"
-      (( flags & 4 )) || die "invalid pool spec '$spec': issuer $issuer does not have AUTH_IMMUTABLE set and could still set AUTH_REVOCABLE or AUTH_CLAWBACK_ENABLED"
+      if [[ "$flags" =~ ^[0-9]+$ ]]; then
+        (( flags & 1 )) && warn "issuer $issuer has AUTH_REQUIRED set: deposits fail until it authorizes the pool's balance"
+        (( flags & 2 )) && warn "issuer $issuer has AUTH_REVOCABLE set: it can freeze the pool's balance, and with it every user's notes at once"
+        (( flags & 8 )) && warn "issuer $issuer has AUTH_CLAWBACK_ENABLED set: it can claw back the pool's balance, and the users who withdraw last lose"
+        (( flags & 4 )) || warn "issuer $issuer does not have AUTH_IMMUTABLE set: it can still set AUTH_REQUIRED, AUTH_REVOCABLE, or AUTH_CLAWBACK_ENABLED"
+      else
+        warn "could not read the account flags of issuer $issuer, so its powers over the pool's balance are unknown"
+      fi
       printf '%s\n' "$token"
       printf '%s\n' "{\"kind\":\"classic\",\"code\":\"$code\",\"issuer\":\"$issuer\"}"
       ;;
@@ -882,3 +889,9 @@ mkdir -p "$DEPLOYMENTS_DIR"
 DEPLOY_JSON_PRETTY="$(printf '%s\n' "$DEPLOY_JSON" | jq --argjson metadata "$NETWORK_METADATA" '. + $metadata')"
 printf '%s\n' "$DEPLOY_JSON_PRETTY" > "$DEPLOYMENTS_DIR/deployments.json"
 printf '%s\n' "$DEPLOY_JSON_PRETTY"
+
+# A --skip-init deployment runs no constructors, so it stores no admin and every check would fail.
+if [[ "$SKIP_INIT" != "true" ]]; then
+  step "verify the deployment against its manifest"
+  "$SCRIPT_DIR/verify-deployment.sh" "$NETWORK" --manifest "$DEPLOYMENTS_DIR/deployments.json" >&2
+fi
