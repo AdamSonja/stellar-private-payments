@@ -6,14 +6,12 @@ use crate::types::{
     OperationalFeedItem, PortfolioBalance, PortfolioPoolEntry, PublicKeyEvent, RecipientLookup,
     UserNoteSummary, UserOperation,
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use rusqlite::{Connection, Error as SqlError, OptionalExtension, params, params_from_iter};
 use rusqlite_migration::{M, Migrations};
 use serde::{Serialize, de::DeserializeOwned};
 use std::{collections::HashSet, path::Path};
 
-// shouldn't be changed for WASM OPFS otherwise the db will be lost
-const DB_NAME: &str = "spp.db";
 pub const APP_SETTING_BOOTNODE_CONFIG: &str = "bootnode_config";
 pub const APP_SETTING_GVK_AUTHORITY: &str = "gvk_authority";
 pub const APP_SETTING_EXPLORER: &str = "explorer";
@@ -30,7 +28,7 @@ const MIGRATION_ARRAY: &[M] = &[
 const MIGRATIONS: Migrations = Migrations::from_slice(MIGRATION_ARRAY);
 
 pub struct Storage {
-    conn: Connection,
+    pub(super) conn: Connection,
 }
 
 #[derive(Debug, Clone)]
@@ -74,19 +72,35 @@ pub(crate) type DeriveNoteFn<'a> =
     dyn FnMut(&AccountKeys, &PoolCommitmentRow) -> Result<Option<DerivedUserNoteRow>> + 'a;
 
 impl Storage {
-    pub fn connect() -> Result<Self> {
-        Self::connect_file(DB_NAME)
+    /// Validate every database page and foreign-key relationship after
+    /// restoring a backup.
+    pub fn check_integrity(&self) -> Result<()> {
+        check_integrity(&self.conn)
     }
 
-    pub fn connect_file(path: impl AsRef<Path>) -> Result<Self> {
-        Self::connect_with_connection(Connection::open(path.as_ref())?)
+    /// Open encrypted storage with an explicit key and create/open policy.
+    pub fn connect_encrypted(
+        path: impl AsRef<Path>,
+        key: &super::database_key::DatabaseKey,
+        purpose: super::database_key::OpenPurpose,
+    ) -> Result<Self> {
+        Self::connect_with_connection(super::database_key::open(path.as_ref(), key, purpose)?)
+    }
+
+    /// Open another handle to encrypted storage that an open handle already
+    /// unlocked with `key`. Used for forks.
+    pub fn reopen_encrypted(
+        path: impl AsRef<Path>,
+        key: &super::database_key::DatabaseKey,
+    ) -> Result<Self> {
+        Self::connect_with_connection(super::database_key::reopen(path.as_ref(), key)?)
     }
 
     pub fn connect_in_memory() -> Result<Self> {
         Self::connect_with_connection(Connection::open_in_memory()?)
     }
 
-    fn connect_with_connection(mut conn: Connection) -> Result<Self> {
+    pub(super) fn connect_with_connection(mut conn: Connection) -> Result<Self> {
         // Table rebuilds in migrations must not cascade into dependent tables.
         conn.pragma_update(None, "foreign_keys", "OFF")?;
         MIGRATIONS.to_latest(&mut conn)?;
@@ -355,10 +369,12 @@ impl Storage {
     }
 
     pub fn get_setting_json<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        // The historical JSON column has NUMERIC affinity: SQLite stores bare
+        // JSON numbers as INTEGER/REAL. Cast on read to support existing rows.
         let raw: Option<String> = self
             .conn
             .query_row(
-                "SELECT value FROM app_settings WHERE key = ?1",
+                "SELECT CAST(value AS TEXT) FROM app_settings WHERE key = ?1",
                 params![key],
                 |row| row.get(0),
             )
@@ -1820,8 +1836,40 @@ fn optional_gvk_ciphertext_col(
     }
 }
 
+pub(super) fn check_integrity(conn: &Connection) -> Result<()> {
+    let mut statement = conn.prepare("PRAGMA integrity_check")?;
+    let messages = statement
+        .query_map([], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    ensure!(messages == ["ok"], "database integrity check failed");
+    ensure!(
+        conn.prepare("PRAGMA foreign_key_check")?
+            .query([])?
+            .next()?
+            .is_none(),
+        "database foreign key check failed"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn numeric_app_settings_round_trip() -> anyhow::Result<()> {
+        let mut storage = super::Storage::connect_in_memory()?;
+        assert_eq!(storage.get_setting_json::<u32>("auto_lock_minutes")?, None);
+        for minutes in [5_u32, 15, 0] {
+            storage.set_setting_json("auto_lock_minutes", &minutes)?;
+            assert_eq!(
+                storage.get_setting_json::<u32>("auto_lock_minutes")?,
+                Some(minutes)
+            );
+        }
+        storage.set_setting_json("fraction", &1.5_f64)?;
+        assert_eq!(storage.get_setting_json::<f64>("fraction")?, Some(1.5));
+        Ok(())
+    }
+
     use super::*;
     use crate::{
         state::test_events,
@@ -3432,7 +3480,6 @@ mod tests {
     #[tokio::test]
     async fn gvk_ciphertext_persists_and_audits() -> Result<()> {
         use crate::{
-            storage::LocalStorage,
             types::BabyJubJubPoint,
             zk::gvk::{GvkNote, generate_gvk_nonce},
         };
@@ -3445,7 +3492,7 @@ mod tests {
                 .expect("clock")
                 .as_nanos()
         ));
-        let mut storage = Storage::connect_file(&path)?;
+        let mut storage = crate::state::test_storage(&path)?;
         let d_priv = Field(crate::types::U256::from(0xAD00));
         let admin = BabyJubJubPoint::from_priv_scalar(&d_priv).expect("valid admin key");
         let note = GvkNote::new(
@@ -3516,10 +3563,10 @@ mod tests {
 
         drop(storage);
 
-        let rows = Storage::connect_file(&path)?.list_pool_gvk_events("CPOOL", None, 10)?;
+        let rows = crate::state::test_storage(&path)?.list_pool_gvk_events("CPOOL", None, 10)?;
         assert_eq!(rows.len(), 1);
 
-        let local = LocalStorage::open(path.to_str().expect("temp path utf-8"))
+        let local = crate::state::test_local_storage(path.to_str().expect("temp path utf-8"))
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let mut audit =
             crate::gvk::GvkAudit::new(crate::StorageHandle::from(local), "CPOOL", d_priv);

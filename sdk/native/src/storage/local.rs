@@ -35,15 +35,36 @@ use crate::{
 /// In-process SQLite wallet storage (native only).
 pub struct LocalStorage {
     path: PathBuf,
+    database_key: std::sync::Arc<crate::state::database_key::DatabaseKey>,
     db: Mutex<SqliteStorage>,
 }
 
 impl LocalStorage {
-    pub fn open(storage_path: &str) -> Result<Self, Error> {
+    /// Open persistent storage with an explicit key and create/open policy.
+    pub fn open_encrypted(
+        storage_path: &str,
+        key: crate::state::database_key::DatabaseKey,
+        purpose: crate::state::database_key::OpenPurpose,
+    ) -> Result<Self, Error> {
         let path = PathBuf::from(storage_path);
-        let db = SqliteStorage::connect_file(&path).context("open storage")?;
+        let db = SqliteStorage::connect_encrypted(&path, &key, purpose)?;
         Ok(Self {
             path,
+            db: Mutex::new(db),
+            database_key: std::sync::Arc::new(key),
+        })
+    }
+
+    /// Reopen an encrypted database already unlocked with this key.
+    pub fn open_with_key(
+        storage_path: &str,
+        key: &crate::state::database_key::DatabaseKey,
+    ) -> Result<Self, Error> {
+        let path = PathBuf::from(storage_path);
+        let db = SqliteStorage::reopen_encrypted(&path, key).context("open encrypted storage")?;
+        Ok(Self {
+            path,
+            database_key: std::sync::Arc::new(crate::state::database_key::DatabaseKey::new(**key)),
             db: Mutex::new(db),
         })
     }
@@ -54,6 +75,17 @@ impl LocalStorage {
 
     pub fn storage_mut(&self) -> MutexGuard<'_, SqliteStorage> {
         self.db.lock().expect("storage lock poisoned")
+    }
+
+    /// Open an independent connection, retaining the key for encrypted storage.
+    pub(crate) fn fork_local(&self) -> Result<Self, Error> {
+        let db = SqliteStorage::reopen_encrypted(&self.path, &self.database_key)
+            .context("fork encrypted storage")?;
+        Ok(Self {
+            path: self.path.clone(),
+            database_key: self.database_key.clone(),
+            db: Mutex::new(db),
+        })
     }
 
     pub fn get_gvk_authority_setting(&self) -> Result<Option<GvkAuthoritySetting>, Error> {
@@ -94,11 +126,7 @@ impl ContractDataStorage for LocalStorage {
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Storage for LocalStorage {
     fn fork(&self) -> Result<crate::storage::StorageHandle, Error> {
-        let db = SqliteStorage::connect_file(self.path.as_path()).context("fork storage")?;
-        let forked = Self {
-            path: self.path.clone(),
-            db: Mutex::new(db),
-        };
+        let forked = self.fork_local()?;
         Ok(crate::storage::StorageHandle::from(forked))
     }
 

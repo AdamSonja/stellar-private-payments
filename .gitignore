@@ -82,6 +82,7 @@ js-license-scan-report.json
 # writes spp.db there, so a first run would otherwise dirty the working tree.
 spp-example-wallet.sqlite
 spp-example-wallet.sqlite-*
+spp-example-wallet.sqlite.*
 spp-*-wallet/
 
 deployments/local/

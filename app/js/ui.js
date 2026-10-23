@@ -1,3 +1,4 @@
+import { LocalData } from './ui/local-data.js';
 import { Templates } from './ui/templates.js';
 import { Shell, Wallet } from './ui/navigation.js';
 import { Transactions } from './ui/transactions.js';
@@ -12,6 +13,7 @@ import { rememberedNoteOwner } from './account-session.js';
 document.addEventListener('DOMContentLoaded', async () => {
     Templates.init();
     Shell.init();
+    LocalData.init();
     Wallet.init();
     Transactions.init();
     SigningAccount.init();
@@ -26,6 +28,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     // one, connecting would take Freighter's active account as the owner, and
     // that may be an account last used to sign; wait for the user to connect.
     if (rememberedNoteOwner() && await getConnectedAddress()) {
-        Wallet.connect({ auto: true }).catch(() => {});
+        await Wallet.connect({ auto: true }).catch(() => {});
     }
+    // After the wallet reconnects, so the unlock can finish connecting it.
+    await LocalData.resumeAfterImport();
 });

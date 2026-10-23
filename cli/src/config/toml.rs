@@ -21,6 +21,7 @@ pub struct DefaultsSection {
     /// Stellar CLI network name (default: the deployment's network).
     pub network: Option<String>,
     pub data_dir: Option<PathBuf>,
+    pub storage_account: Option<String>,
     pub circuits_dir: Option<PathBuf>,
     pub stellar_config_dir: Option<PathBuf>,
 }
@@ -34,8 +35,9 @@ fn config_template() -> String {
 # deployment = "/path/to/deployment" # directory or deployments.json; required unless provisioned in data_dir
 # network = "testnet" # optional Stellar CLI name; defaults to deployment.network
 # data_dir = "{DEFAULT_DATA_DIR_TEMPLATE}"
+# storage_account = "alice" # identity that unlocks this database
 # circuits_dir = "/path/to/artifacts" # optional; packaged circuits/ or repo target/circuits-artifacts, with circuit_keys/ fallback
-# stellar_config_dir = "~/.config/stellar"
+# stellar_config_dir = "~/.config/stellar" # passed to the `stellar` CLI (--config-dir)
 "#
     )
 }

@@ -18,6 +18,7 @@ import {
   isBootnodeConsentVisible,
   isOnboardingWizardVisible,
   readAppLifecycle,
+  waitForAppShell,
   waitForWalletRuntimeReady,
 } from './appState.mjs';
 import { chromium } from 'playwright';
@@ -109,16 +110,7 @@ export async function connectApp(page, { appUrl = requireAppUrl(), context } = {
   if (!context) throw new Error('connectApp: context is required (needed to watch for the connect approval)');
   await page.goto(appUrl);
   await page.waitForLoadState('domcontentloaded');
-  await waitForCondition({
-    operation: 'app:load',
-    timeoutMs: 10_000,
-    intervalMs: 100,
-    observe: async () => ({
-      readyState: await page.evaluate(() => document.readyState),
-      dashboardVisible: await page.getByTestId('view-dashboard').isVisible().catch(() => false),
-    }),
-    isReady: ({ readyState, dashboardVisible }) => readyState === 'complete' && dashboardVisible,
-  });
+  await waitForAppShell(page);
 
   // The button remains in the DOM while connected; visibility distinguishes
   // the disconnected state. Use its stable identity rather than button text.
@@ -148,9 +140,30 @@ export async function connectApp(page, { appUrl = requireAppUrl(), context } = {
   // connect state instead of timing out while `Wallet.connect()` is blocked.
   await waitForCondition({
     operation: 'app:connect-or-setup-modal',
+    ignoreError: () => false,
     timeoutMs: APP_RUNTIME_READY_TIMEOUT_MS,
     intervalMs: 100,
-    observe: () => readAppLifecycle(page),
+    observe: async () => {
+      const error = await page.locator('body').getAttribute('data-wallet-error');
+      if (error) throw new Error(`app connection failed: ${error}`);
+      // A previously locked tab restores the wallet without opening storage.
+      // Provisioning needs a usable runtime, so explicitly unlock that session.
+      if (await page.locator('body').getAttribute('data-wallet-state') === 'locked') {
+        const unlock = page.getByTestId('storage-lock-btn');
+        if (await unlock.isEnabled()) await unlock.click();
+      }
+      // Storage unlock precedes onboarding and needs its own wallet approval.
+      if (await page.locator('body').getAttribute('data-storage-state') === 'unlocking') {
+        const confirmAccount = page.getByTestId('storage-account-continue');
+        if (await confirmAccount.isVisible()) await confirmAccount.click();
+        const approval = await waitForFreighterApproval(context, 'signMessage', { timeoutMs: 500 }).catch(error => {
+          if (error.name !== 'WaitTimeoutError') throw error;
+          return null;
+        });
+        if (approval) await approveOrWatch(context, 'signMessage', { timeoutMs: 30_000 });
+      }
+      return readAppLifecycle(page);
+    },
     isReady: ({ walletState, onboardingVisible, bootnodeConsentVisible }) =>
       walletState === 'ready' || onboardingVisible || bootnodeConsentVisible,
   });

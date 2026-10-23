@@ -313,3 +313,5 @@ bash integration-tests-app/scripts/provision.sh --verify
 concurrent runs at the same restored copy (Chrome's profile storage is
 single-writer). `scripts/run-e2e.sh` does this automatically and cleans up
 afterward.
+
+Unlocking browser storage requires Freighter message approval (two matching signatures when enrolling a new database, and one on later opens), which the runner handles automatically before onboarding.

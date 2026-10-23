@@ -9,6 +9,7 @@ import { waitForSyncedLedger } from '../src/indexer.mjs';
 import { deposit, withdraw, waitForToast } from '../src/moveFunds.mjs';
 import { gotoAdvanced, gotoMoveFlow, gotoMoveFunds } from '../src/navigation.mjs';
 import { waitForNotesAfterIndexer } from '../src/notes.mjs';
+import { waitForCondition } from '../src/waits.mjs';
 import { driveWizard } from '../src/onboarding.mjs';
 import { RPC_URL, createAccount, fund } from '../src/testAccount.mjs';
 import { importAdditionalAccount, selectFreighterAccount } from '../src/wallet.mjs';
@@ -70,7 +71,14 @@ export async function run(helpers) {
   await select.selectOption('__other__');
   await page.getByTestId('signing-account-input').fill(signer);
   await page.getByTestId('signing-account-use').click();
-  assert((await select.inputValue()) === signer, 'the signer account was not selected to sign and pay');
+  // The picker switches once the signer list is saved to encrypted storage.
+  await waitForCondition({
+    operation: 'signing-account:use',
+    timeoutMs: 10_000,
+    intervalMs: 100,
+    observe: async () => ({ selected: await select.inputValue() }),
+    isReady: ({ selected }) => selected === signer,
+  });
 
   // A previous selection of the signer must not affect deposits: the owner
   // signs and pays.
@@ -105,9 +113,12 @@ export async function run(helpers) {
   await waitForToast(page, { origin: 'withdraw', predicate: (toast) => /Choose a withdrawal recipient/.test(toast.message) });
   assert(!(await page.getByTestId('confirm-dialog').isVisible()), 'blank recipient opened confirmation');
   await page.locator('#withdraw-recipient-select').selectOption(owner);
-  await select.selectOption('');
+  // The empty prompt option is intentionally disabled in the production UI.
+  // Leaving the "Enter another address" choice unfinished is the reachable
+  // missing-signer path.
+  await select.selectOption('__other__');
   await page.locator('#btn-withdraw').click();
-  await waitForToast(page, { origin: 'withdraw', predicate: (toast) => /Choose an account to sign and pay with/.test(toast.message) });
+  await waitForToast(page, { origin: 'withdraw', predicate: (toast) => /Enter the account to sign and pay with/.test(toast.message) });
   assert(!(await page.getByTestId('confirm-dialog').isVisible()), 'blank signer opened confirmation');
   await select.selectOption(owner);
   // Saved accounts can receive funds without pasting an address.

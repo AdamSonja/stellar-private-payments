@@ -7,7 +7,7 @@ WEB="$ROOT/sdk/web"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 PROFILE="${WASM_PROFILE:-release}"
 TARGET="wasm32-unknown-unknown"
-ARTIFACTS="$ROOT/target/$TARGET/$PROFILE"
+ARTIFACTS="$CARGO_TARGET_DIR/$TARGET/$PROFILE"
 
 # Cargo uses `--release` for the release profile and `--profile <name>` for custom profiles.
 case "$PROFILE" in
@@ -19,7 +19,7 @@ case "$PROFILE" in
     ;;
 esac
 
-WASM_BINDGEN_VERSION="${WASM_BINDGEN_VERSION:-0.2.126}"
+WASM_BINDGEN_VERSION="${WASM_BINDGEN_VERSION:-0.2.128}"
 WASM_OUT_NAME="stellar_private_payments_web"
 
 echo "==> Verifying circuit artifacts match lockfile..."
@@ -50,9 +50,9 @@ if [[ "$(uname -s)" == "Darwin" && -z "${AR_wasm32_unknown_unknown:-}${TARGET_AR
 fi
 
 echo "==> Building stellar-private-payments-web ($PROFILE)..."
-cargo build -p stellar-private-payments-web $CARGO_PROFILE_FLAG --target "$TARGET"
-cargo build -p stellar-private-payments-web $CARGO_PROFILE_FLAG --target "$TARGET" --bin storage-worker
-cargo build -p stellar-private-payments-web $CARGO_PROFILE_FLAG --target "$TARGET" --bin prover-worker
+cargo build --locked -p stellar-private-payments-web $CARGO_PROFILE_FLAG --target "$TARGET"
+cargo build --locked -p stellar-private-payments-web $CARGO_PROFILE_FLAG --target "$TARGET" --bin storage-worker
+cargo build --locked -p stellar-private-payments-web $CARGO_PROFILE_FLAG --target "$TARGET" --bin prover-worker
 
 if ! command -v wasm-bindgen >/dev/null 2>&1; then
   echo "error: wasm-bindgen not found — cargo install wasm-bindgen-cli --version ${WASM_BINDGEN_VERSION} --locked --force" >&2

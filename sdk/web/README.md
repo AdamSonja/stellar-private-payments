@@ -29,7 +29,8 @@ const signer = new FreighterSigner();
 
 await init();
 
-const storage = await Storage.open();
+// keyProvider must return the same recoverable 32-byte key on later opens.
+const storage = await Storage.open({ keyProvider, createNew: false });
 
 if (await bootnodeRequired(rpcUrl, storage, { contractConfig })) {
   // load or prompt for a bootnode URL, then pass it to Client.new
@@ -121,15 +122,11 @@ only exists once `scripts/stage-wasm-types.sh` has staged it from `dist/`.
 
 ## Workers
 
-Web Workers are used for the provided storage (SQlite OPFS) and prover implementations.
-`Storage.open()` defaults to the bundled storage worker URL via
-`import.meta.url`; override with `workerUrl` on `Storage.open()` or
-`storageWorkerUrl` on `Client.new()`. The prover worker URL defaults the same
-way (`proverWorkerUrl`), loading circuit artifacts from `dist/circuits/`.
+Web Workers run the OPFS SQLite storage backend and Groth16 prover off the main thread. `Storage.open()` and `Client.new()` resolve default worker URLs relative to `import.meta.url` (overridable via `workerUrl`, `storageWorkerUrl`, and `proverWorkerUrl`). When `Client.new()` opens storage itself instead of receiving a `storage` handle, pass `keyProvider` in its options.
 
 ## Build & publish (maintainers)
 
-Building the npm package from source requires the monorepo, `wasm-bindgen-cli`, and [Binaryen](https://github.com/WebAssembly/binaryen) `wasm-opt` (see CONTRIBUTING.md):
+Browser builds compile SQLite3MC through `sqlite-wasm-rs` (`sqlite3mc` feature), which requires Clang and `llvm-ar` (or `ar`). Building the npm package from source also requires `wasm-bindgen-cli` and [Binaryen](https://github.com/WebAssembly/binaryen) `wasm-opt` (see [CONTRIBUTING.md](../../CONTRIBUTING.md)):
 
 ```bash
 make circuits
@@ -172,6 +169,28 @@ Compiled `.graph.bin` / `.r1cs` files incorporate [iden3/circomlib](https://gith
 | `dist/LICENSE.txt` | Apache-2.0 (this SDK) |
 
 The Pool Stellar web app uses the same legal layout via Trunk (`deployments/scripts/stage-dist-legal.sh`). If you redistribute the compiled circuits, comply with LGPL-3.0 (see NOTICE).
+
+## Mandatory storage encryption
+
+`Storage.open` requires a `keyProvider` before starting the storage worker. Passing `createNew: true` initializes a fresh encrypted database in OPFS (`spp.encrypted.db`), while `createNew: false` opens an existing one and fails if it is missing. Every table, including synced chain events and app settings, lives inside that encrypted database; there is no plaintext fallback or automatic browser migration.
+
+In the web app, `keyProvider` seals a random 32-byte database key in `localStorage` under `AES-256-GCM`, using a wrapping key derived via `HKDF-SHA-256` from a verified Freighter signature in a dedicated storage domain. Enrolling a new database requests two signatures over the unlock message to confirm the wallet signs deterministically before sealing the key; later opens need one signature. When the user locks storage manually or the inactivity timer expires, the app closes the storage worker and reloads the page so decrypted state in WASM and JavaScript memory is discarded.
+
+### Encrypted backups and recovery
+
+Because the database key is random and only its wrapped envelope lives in `localStorage`, the OPFS database files and the `localStorage` envelope depend on each other. The **Local storage backup and recovery** controls in the app's settings drawer package both together into a single backup archive (up to 256 MiB). Export, import, and reset work whether storage is locked or unlocked. When it is unlocked, the app first closes the worker so the files are consistent, and the tab then reloads into the locked state. Exporting locked storage copies the files without a signature or reload. The archive holds only ciphertext and the wrapped key envelope, so restoring it still requires signing with the original unlocking wallet account.
+
+Importing accepts backups from the same origin (`scheme`, `host`, and `port`). Rather than overwriting the live database in place, the app stages the archive into a fresh OPFS directory, asks the enrolled wallet to unlock it, and runs SQLite integrity and foreign-key checks against the staged files. Only after those checks pass does a single `localStorage` write switch the active envelope and directory pointer; if anything fails along the way, the existing storage remains untouched. After a successful import, the reloaded tab asks the wallet to unlock the restored storage. Restoring a backup replaces local state with the snapshot from export time and does not merge later local changes.
+
+If `localStorage` is cleared while encrypted OPFS files remain on disk, signing again with Freighter cannot reconstruct the lost random key. In that state, the app stops before enrollment so the user can either import a backup or wipe local storage cleanly. Separately, if an unencrypted `.opfs-sahpool` directory from an earlier build is still on disk, the app warns that legacy plaintext files are present and offers to remove them. **Reset local storage** (confirmed by typing `DELETE` with other app tabs closed) removes this origin's encrypted and legacy OPFS directories, key envelope, and legacy signer associations without affecting on-chain funds. The next wallet connection then enrolls new storage.
+
+To run the browser backup round-trip test after building the SDK:
+
+```sh
+node integration-tests-app/scripts/test-storage-backup.mjs
+```
+
+The test drives a temporary Chromium profile with ephemeral signing keys (`E2E_CHROMIUM_PATH` overrides the browser binary) and does not need a Stellar network.
 
 ### Token amounts
 

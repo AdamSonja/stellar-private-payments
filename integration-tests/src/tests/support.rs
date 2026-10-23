@@ -26,6 +26,7 @@ pub struct TestSession {
     pub identity: DeploymentIdentity,
     pool_contract_ids: Vec<String>,
     storage_path: PathBuf,
+    storage_key: std::sync::Arc<stellar_private_payments::state::database_key::DatabaseKey>,
 }
 
 impl TestSession {
@@ -45,12 +46,20 @@ impl TestSession {
     /// `config` (e.g. another `kdf_domain`).
     pub async fn fork(&self, config: ContractConfig) -> Result<TestSession> {
         let network = LocalNetwork::start().await?;
+        let storage = LocalStorage::open_with_key(
+            self.storage_path
+                .to_str()
+                .context("storage path is not UTF-8")?,
+            &self.storage_key,
+        )?;
         build_session(
             &network,
             config,
             self.identity.clone(),
             self.wallet.clone(),
             self.storage_path.clone(),
+            self.storage_key.clone(),
+            storage,
         )
         .await
     }
@@ -119,7 +128,24 @@ pub async fn session(
         wallet.address()
     ));
     let _ = std::fs::remove_file(&storage_path);
-    build_session(&network, config, identity, wallet, storage_path).await
+    let storage_key = std::sync::Arc::new(
+        stellar_private_payments::state::database_key::DatabaseKey::generate()?,
+    );
+    let storage = LocalStorage::open_encrypted(
+        storage_path.to_str().context("storage path is not UTF-8")?,
+        stellar_private_payments::state::database_key::DatabaseKey::new(**storage_key),
+        stellar_private_payments::state::database_key::OpenPurpose::CreateNew,
+    )?;
+    build_session(
+        &network,
+        config,
+        identity,
+        wallet,
+        storage_path,
+        storage_key,
+        storage,
+    )
+    .await
 }
 
 async fn build_session(
@@ -128,10 +154,11 @@ async fn build_session(
     identity: DeploymentIdentity,
     wallet: TestKeypair,
     storage_path: PathBuf,
+    storage_key: std::sync::Arc<stellar_private_payments::state::database_key::DatabaseKey>,
+    storage: LocalStorage,
 ) -> Result<TestSession> {
     let pool_entries: Vec<PoolConfigEntry> = config.enabled_pools().cloned().collect();
-    let storage =
-        LocalStorage::open(storage_path.to_str().context("storage path is not UTF-8")?)?.into();
+    let storage = storage.into();
 
     let lock = stellar_private_payments::circuit_lock(&std::fs::read_to_string(
         network::repo_root().join("deployments/testnet/circuits.json"),
@@ -195,5 +222,6 @@ async fn build_session(
             .map(|e| e.pool_contract_id)
             .collect(),
         storage_path,
+        storage_key,
     })
 }

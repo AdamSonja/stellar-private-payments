@@ -11,13 +11,14 @@ import {
 } from '../index.js';
 
 declare const rpcUrl: string;
+declare const keyProvider: import('../api-types.js').DatabaseKeyProvider;
 declare const circuitLock: import('../api-types.js').CircuitLockInput;
 declare const signer: import('../signer.js').WalletSigner;
 
 async function typedConsumer(config: ContractConfig) {
   void TX_PROGRESS_EVENT;
 
-  const storage = await Storage.open();
+  const storage = await Storage.open({ keyProvider, createNew: true });
   const client = await Client.new({
     rpcUrl,
     storage,

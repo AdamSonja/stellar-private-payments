@@ -16,7 +16,13 @@ Core application logic lives in Rust `sdk/` crates (sync primitives, indexer, tx
 
 **Storage**
 
-Local storage is SQLite (`sdk/native/src/state/storage.rs`, schema in `sdk/native/src/state/schema.sql`), shared across platforms. In the browser the database file (`spp.db`) lives on OPFS behind the storage worker.
+Local storage is SQLite (`sdk/native/src/state/storage.rs`, schema in `sdk/native/src/state/schema.sql`), shared across platforms. In the browser, `spp.encrypted.db` lives on OPFS behind the storage worker; on the command line, the CLI writes `spp.db` and its key record `spp.db.key` in the data directory.
+
+Persistent databases are encrypted with SQLite3MC under a random 32-byte key supplied when opening storage. Rather than deriving that key from a password, the web app and CLI seal it under a wallet signature in a dedicated storage domain: Freighter in the browser, or a Stellar CLI identity (`--storage-account`, defaulting to `--account`) on the command line. Keeping storage unlock in its own signing domain separates it from both privacy-key derivation and transaction authorization, and only the public signing context and encrypted key envelope are written to disk.
+
+On the command line, that envelope protects a copied database only if an attacker cannot sign with the enrolled identity. When the Stellar CLI stores that identity's secret key as a plaintext file on the same disk as `spp.db` and `spp.db.key`, someone who reads the disk gets both the ciphertext and the key that unwraps it. Real at-rest protection comes from keeping the signing key in the OS secure store or a hardware wallet, which in turn means each CLI command that opens storage may prompt for signer approval.
+
+In the browser, the header's Lock/Unlock control closes the storage worker and reloads the page so decrypted WASM and UI state are discarded from memory. A `sessionStorage` marker lets the reloaded tab restore the public wallet connection in the `Locked` state and run public disclosure verification, while private views, background sync, onboarding, and receipt generation stay inert until the user unlocks storage again, either with Unlock or by clicking Connect. Resetting local storage clears the marker, since there is nothing left to unlock. By default, storage also locks after five minutes of inactivity. Users can change that timeout in encrypted settings to 15, 30, or 60 minutes, or `Never`, and an in-flight transaction or proof can defer an expired timer by up to ten minutes so an active operation is not cut off mid-flight.
 
 ## Browser SDK (`sdk/web`)
 
@@ -62,7 +68,7 @@ The UI is JavaScript. It imports the SDK package (or `wasm-facade.js` helpers) a
 
 **`Storage` (WASM, wasm-bindgen API)**
 
-- Spawns the storage worker once per page (`Storage.open({ workerUrl? })`).
+- Spawns the storage worker once per page (`Storage.open({ workerUrl?, keyProvider, createNew?, directory? })`).
 - `fork()` returns another handle to the same worker/DB (used internally by `Client::new`).
 - `call(request, timeoutMs?)` exposes the typed worker protocol for advanced/app-layer use.
 
@@ -230,3 +236,9 @@ Freighter account change triggers disconnect. The user reconnects and re-runs on
 ### RPC sync gap
 
 When the wallet RPC cannot serve the full event history, `bootnodeRequired` returns true. The app prompts for a bootnode URL, persists it in app settings, and the indexer catches up via bootnode before handing off to the wallet RPC.
+
+### Settings available while locked
+
+While storage is locked, the settings drawer still displays the connected wallet's address, network, and on-chain public-key registration without opening SQLite or asking for a signature. To show registration status, the app reads `Registration(address)` directly from the registry contract and keeps the result only in page memory, rendering “Unavailable” on lookup errors or “No active registration found” when no live entry exists.
+
+Only the block explorer URL lives in `localStorage` as an unencrypted preference. The inactivity timeout, custom bootnode URL, telemetry settings, ASP secret, and saved signing-account associations stay inside encrypted SQLite. If older `localStorage` signer associations are present from a previous version, the app migrates them into SQLite after unlock and then deletes the plaintext entries.

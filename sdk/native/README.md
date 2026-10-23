@@ -14,6 +14,16 @@ Add to your project:
 cargo add stellar-private-payments
 ```
 
+## Building
+
+Native builds compile the SQLite3MC 2.5.1 amalgamation from `sqlite3mc-src` using a C compiler and `ar` (plus `musl-gcc` for `musl` targets). WASM builds compile the same SQLite3MC release through `sqlite-wasm-rs` (`sqlite3mc` feature) using Clang and an LLVM-compatible archiver.
+
+```sh
+cargo build -p stellar-private-payments-cli --release
+cargo test -p stellar-private-payments --lib
+cargo build -p stellar-private-payments-cli --release --target x86_64-unknown-linux-musl
+```
+
 ## Quick start
 
 ```rust
@@ -23,7 +33,12 @@ use stellar_private_payments::{
 };
 
 let deployment: ContractConfig = /* load from deployments/ */;
-let storage = LocalStorage::open("wallet.sqlite")?;
+// Obtain this database's key from your caller-owned key provider.
+let storage = LocalStorage::open_encrypted(
+    "wallet.sqlite",
+    key,
+    stellar_private_payments::state::database_key::OpenPurpose::OpenExisting,
+)?;
 
 let lock = stellar_private_payments::circuit_lock(&std::fs::read_to_string("./circuits.json")?)?;
 let store = CircuitStore::open("./circuits", lock);
@@ -138,7 +153,21 @@ See the CLI's `logging` module for a full example (human vs. JSON output) config
 
 ## Browser / WASM SDK
 
-See [`../web/README.md`](../web/README.md).
+See [`../web/README.md`](../web/README.md). JS method names align with Rust where possible (`operationalFeed`, `recipientLookup`, `privacyKeys`, `isRegistered`).
+
+## Mandatory storage encryption
+
+Every persistent SQLite database is encrypted with SQLite3MC under a 32-byte `DatabaseKey`. Callers open storage through `LocalStorage::open_encrypted`, `LocalStorage::open_with_key`, or `SqliteStorage::connect_encrypted`, while `state::native_wallet::unlock_with_stellar` and `unlock_with` manage wallet-sealed key envelopes and migrate legacy plaintext files in place. In-memory storage (`SqliteStorage::connect_in_memory`) remains available for transient work.
+
+On the command line, the CLI unlocks `spp.db` with a Stellar CLI identity (`--storage-account <alias>`, `SPP_STORAGE_ACCOUNT`, or `defaults.storage_account` in TOML). That identity defaults to `--account` rather than `--sign-as`, so changing the transaction payer does not switch which key unlocks local storage. Commands that take no `--account`, such as `spp config show`, require `--storage-account` (or its env/config equivalent) explicitly.
+
+When initializing a database, the CLI asks the storage identity to sign a dedicated unlock message twice and checks that both signatures match before trusting the signer to be deterministic. It then derives a wrapping key from that signature with HKDF-SHA-256 and seals a random 32-byte database key with XSalsa20-Poly1305 in `spp.db.key`. Later runs request a single signature and reuse the unlocked key for the rest of the command. If `spp.db` is still an older plaintext database, the first open encrypts it in place. Because `spp.db.key` holds the wrapped random key, `spp.db` and `spp.db.key` must be backed up and restored together; a mismatched identity, invalid signature, or damaged key record aborts before modifying either file.
+
+For browser storage and backups, see [`../web/README.md`](../web/README.md#encrypted-backups-and-recovery).
+
+### CLI storage threat model
+
+Encrypting `spp.db` under `spp.db.key` helps against a copied data directory only if an attacker cannot also sign the storage-unlock message with the enrolled identity. There is no separate storage password. If the Stellar CLI keeps that identity's secret key as an unencrypted file on the same disk, anyone who can read `spp.db` and `spp.db.key` can usually read the signing key too and unwrap the database. An OS secure store or hardware wallet is what puts a real boundary between the database files and the key that unlocks them, with the trade-off that each CLI invocation opening storage may prompt for signer approval. Once a command unlocks the database, plaintext state lives in process memory for the duration of that run.
 
 ### Token amounts
 

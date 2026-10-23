@@ -157,7 +157,17 @@ async fn recover_deposit(extra_pools: bool, port: u16) {
     let _cleanup = Cleanup(directory.clone());
     let path = directory.join("wallet.db");
     for reopen in [false, true] {
-        let storage = LocalStorage::open(path.to_str().expect("path")).expect("storage");
+        let purpose = if reopen {
+            stellar_private_payments::state::database_key::OpenPurpose::OpenExisting
+        } else {
+            stellar_private_payments::state::database_key::OpenPurpose::CreateNew
+        };
+        let storage = LocalStorage::open_encrypted(
+            path.to_str().expect("path"),
+            stellar_private_payments::state::database_key::DatabaseKey::new([0x42; 32]),
+            purpose,
+        )
+        .expect("storage");
         if !reopen {
             storage
                 .save_private_keys(

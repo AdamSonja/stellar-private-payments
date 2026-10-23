@@ -72,6 +72,10 @@ struct Cli {
     #[arg(long, global = true)]
     sign_as: Option<String>,
 
+    /// Stellar CLI identity that unlocks storage (defaults to --account).
+    #[arg(long, global = true, env = "SPP_STORAGE_ACCOUNT")]
+    storage_account: Option<String>,
+
     /// Emit JSON instead of human-readable output
     #[arg(long, global = true)]
     json: bool,
@@ -282,6 +286,7 @@ fn main() -> Result<()> {
         config_path,
         file_config,
         CliConfigOverrides {
+            storage_account: cli.storage_account,
             deployment_path: cli.deployment,
             network: cli.network,
             data_dir: cli.data_dir,

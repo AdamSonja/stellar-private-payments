@@ -10,8 +10,8 @@
 //!     types::{CircuitStem, ContractConfig, NoteOwnerAddress, PolicyFlags, SignerAddress},
 //! };
 //!
-//! # async fn example(deployment: ContractConfig) -> Result<(), Box<dyn std::error::Error>> {
-//! let storage = LocalStorage::open("wallet.sqlite")?.into();
+//! # async fn example(deployment: ContractConfig, key: stellar_private_payments::state::database_key::DatabaseKey) -> Result<(), Box<dyn std::error::Error>> {
+//! let storage = LocalStorage::open_encrypted("wallet.sqlite", key, stellar_private_payments::state::database_key::OpenPurpose::OpenExisting)?.into();
 //!
 //! let lock = stellar_private_payments::circuit_lock(&std::fs::read_to_string("./circuits.json")?)?;
 //! let store = CircuitStore::open("./circuits", lock);
@@ -57,6 +57,8 @@ pub mod planner;
 pub mod prover;
 pub mod registration;
 pub mod state;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod stellar_cli;
 pub mod transact;
 pub mod types;
 pub mod zk;

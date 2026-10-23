@@ -141,7 +141,7 @@ function shieldIcon(cls) {
 // ---------------------------------------------------------------------------
 
 async function loadNotes() {
-  if (!App.state.wallet.address) return;
+  if (!App.state.wallet.address || !isRuntimeReady()) return;
   state.notesLoading = true;
   state.notesError = null;
 

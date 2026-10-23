@@ -70,23 +70,38 @@ export interface TelemetryConfig {
 
 /** Options for {@link Storage.open}. */
 export interface StorageOpenOptions {
+  keyProvider: DatabaseKeyProvider;
+  /** Refuse an existing database when true; require an existing one otherwise. */
+  createNew?: boolean;
+  /** Isolated encrypted OPFS directory used for validated backup restoration. */
+  directory?: string;
   workerUrl?: string;
 }
 
+/** Supply a random 256-bit key; preserve a recoverable wrapped copy before
+ * creating the database. Do not return a wallet signature or a SEP-53 key.
+ */
+export type DatabaseKeyProvider = (
+  databaseId: string,
+  purpose: 'create' | 'open',
+) => Uint8Array | Promise<Uint8Array>;
+
 /**
- * Worker-backed local persistence (`spp.db` on OPFS).
+ * Worker-backed local persistence (`spp.encrypted.db` on OPFS).
  *
  * Open once per page via {@link Storage.open}. Call {@link Storage.fork} for
  * additional handles (e.g. app code alongside {@link Client.new}).
  */
 export interface Storage {
   fork(): Storage;
+  /** Releases the database for this handle and all forks. Reopen with Storage.open. */
+  close(): Promise<void>;
   call(request: unknown, timeoutMs?: number): Promise<unknown>;
 }
 
-/** Package entry: `Storage.open()` only (instance methods live on the handle). */
+/** Encrypted storage lives in its own OPFS directory, separate from `spp.db`. */
 export declare const Storage: {
-  open(options?: StorageOpenOptions | null): Promise<Storage>;
+  open(options: StorageOpenOptions): Promise<Storage>;
 };
 
 /** Options for {@link Client.new}. */
@@ -99,6 +114,9 @@ export interface ClientNewOptions {
   /** Expected circuit fingerprints from the selected deployment; required unless prover is supplied. */
   circuitLock?: CircuitLockInput;
   storage?: Storage;
+  /** Required when storage is not supplied. */
+  keyProvider?: DatabaseKeyProvider;
+  createNew?: boolean;
   storageWorkerUrl?: string;
   prover?: ProverBridge;
   proverWorkerUrl?: string;

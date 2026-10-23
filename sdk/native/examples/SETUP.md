@@ -107,8 +107,9 @@ the checked-in testnet deployment explicitly with
 `--deployment deployments/testnet`; the CLI has no embedded deployment fallback.
 
 ```bash
-# Onboard Alice's wallet. The default data dir writes the SQLite wallet to
-# ~/.local/share/stellar-private-payments/spp.db.
+# Onboard Alice's wallet. The default data dir writes the encrypted SQLite
+# wallet and its key envelope to ~/.local/share/stellar-private-payments/spp.db
+# (and spp.db.key).
 cargo run --release -p stellar-private-payments-cli -- \
   --deployment deployments/testnet onboard \
   --account alice --accept --register
@@ -123,16 +124,19 @@ cargo run --release -p stellar-private-payments-cli -- \
 
 What `spp onboard` does:
 
-1. Accepts the disclaimer.
-2. When privacy keys are missing, signs `Privacy Pool Key Derivation [v2] (<kdf_domain>)`
+1. Unlocks or initializes the encrypted SQLite database (`spp.db`) and its
+   wallet key envelope (`spp.db.key`) using `--storage-account` (defaulting to
+   `--account`) via `stellar message sign`.
+2. Accepts the disclaimer.
+3. When privacy keys are missing, signs `Privacy Pool Key Derivation [v2] (<kdf_domain>)`
    via `stellar message sign` using the account alias (the Stellar secret key
    never enters the `spp` process).
-3. Strictly verifies the SEP-53 signature against the account's own public key,
+4. Strictly verifies the SEP-53 signature against the account's own public key,
    then derives and stores the privacy note/encryption keys and ASP blinding.
    An invalid signature or one made by another account aborts onboarding
    without saving privacy keys. Existing keys skip signing, verification, and
    derivation.
-4. Optionally registers the public keys on-chain so other accounts can transfer
+5. Optionally registers the public keys on-chain so other accounts can transfer
    to this address without knowing the raw keys.
 
 > The `spp` CLI and the examples use different default wallet paths. The `spp`
@@ -254,7 +258,8 @@ required by most examples; everything else has a sensible default.
 
 | Variable | Default | Required by |
 | --- | --- | --- |
-| `STELLAR_SECRET_KEY` | — | `account_pool`, `estimate`, `deposit`, `transfer`, `withdraw`, `plan` |
+| `STELLAR_SECRET_KEY` | — | `account_pool`, `estimate`, `deposit`, `transfer`, `withdraw`, `plan` (also unlocks wallets created by `spp onboard` when `SPP_STORAGE_ACCOUNT` is unset) |
+| `SPP_STORAGE_ACCOUNT` | unset | optional `stellar keys` alias used to unlock an encrypted `SPP_WALLET_PATH` database when `STELLAR_SECRET_KEY` is unset or differs from the storage identity |
 | `SPP_RPC_URL` | `https://soroban-testnet.stellar.org` | all examples |
 | `SPP_WALLET_PATH` | `./spp-example-wallet.sqlite` | all examples |
 | `SPP_DEPLOYMENT_JSON` | `deployments/testnet/deployments.json` | all examples |
@@ -268,6 +273,14 @@ required by most examples; everything else has a sensible default.
 `SPP_AMOUNT_STROOPS` is a legacy variable name: its value is in the selected
 pool token's base units. The human-readable amount depends on that token's
 decimals; `10000000` base units equals 1 token only when decimals are 7.
+
+> **Wallet encryption and `sync` / `gvk-audit`:** `common::open_storage`
+> unlocks `SPP_WALLET_PATH` via `SPP_STORAGE_ACCOUNT` first, then
+> `STELLAR_SECRET_KEY`, and falls back to a fixed example key only when neither
+> is set. If you point `SPP_WALLET_PATH` at a database created by `spp onboard`,
+> keep `STELLAR_SECRET_KEY` (or `SPP_STORAGE_ACCOUNT`) exported even when
+> running `sync` or `gvk-audit`; without one of them, the fallback example key
+> cannot unlock the CLI-enrolled database.
 
 > `SPP_BOOTNODE_URL` is read directly by the examples and overrides the default
 > public bootnode. Every example that opens a client reads it, not just `sync`.
